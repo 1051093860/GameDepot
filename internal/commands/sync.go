@@ -132,7 +132,7 @@ func protectKnownOrForce(ctx context.Context, s knownBlobStore, _ string, rel st
 	if known {
 		return nil
 	}
-	return fmt.Errorf("refusing to overwrite local unsubmitted change: %s (%s); run `gamedepot sync --force` to discard it", rel, shortSHA(localSHA))
+	return fmt.Errorf("refusing to overwrite local unsubmitted change: %s (%s); rerun with `--force` to discard it", rel, shortSHA(localSHA))
 }
 
 func downloadBlobToFile(ctx context.Context, s getter, sha string, dst string) error {

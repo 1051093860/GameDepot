@@ -1,278 +1,263 @@
-# GameDepot v0.2
+# GameDepot v0.5.1
 
-GameDepot is a small-team game project collaboration tool prototype.
+GameDepot is a Git + object-store workflow prototype for small UE-style game projects.
 
-Current design:
+v0.5 focuses on Aliyun OSS readiness and blob lifecycle management. v0.5.1 fixes config argument parsing so flags can appear before or after the profile name:
 
-- Git stores code, config, docs, shortcuts, launchers, and the manifest.
-- The blob store stores large binary files by `sha256`.
-- `depot/manifests/main.gdmanifest.json` bridges Git history and blob objects.
-- Rules in `.gamedepot/config.yaml` decide whether each file is `blob`, `git`, or `ignore`.
+- `config add-oss`: convenience profile command for Alibaba Cloud OSS S3-compatible endpoints.
+- `remote-smoke-test`: simulated UE project smoke test against a real store profile such as Aliyun OSS.
+- `delete-version`: manually delete a specific historical blob version.
+- `gc`: list and optionally delete unreferenced blob objects.
+- deletion log: executed deletes append JSONL records under `.gamedepot/logs/deletions.jsonl`.
+- `smoke-test` now exercises delete-version and GC flows.
 
-v0.2 is still using a local fake object store:
+`gc` and `delete-version` are **dry-run by default**. They only delete when you pass `--execute`.
 
-```text
-.gamedepot/remote_blobs/
+A project repository does not store access keys. It only stores:
+
+```yaml
+store:
+  profile: aliyun-oss
+  prefix: projects/PartyGame/blobs
 ```
 
-The next major step is replacing the local store with OSS / COS / OBS / MinIO through an S3-compatible provider.
+The real endpoint, bucket, credentials, and lock user name live in the user's global GameDepot config directory.
 
 ---
 
 ## Build
 
+From the parent directory that contains `GameDepot`:
+
 ```powershell
-cd GameDepot
+cd .\GameDepot
+
 go fmt ./...
 go test ./...
 go build -o gamedepot.exe .\cmd\gamedepot
-```
 
-Linux / macOS:
-
-```bash
-cd GameDepot
-go fmt ./...
-go test ./...
-go build -o gamedepot ./cmd/gamedepot
+cd ..
 ```
 
 ---
 
-## Quick test
+## Local simulated UE smoke test
 
-PowerShell example:
-
-```powershell
-cd C:\Users\meloda\Desktop
-mkdir GDTest_v02
-cd GDTest_v02
-
-git init
-git config user.email "test@example.com"
-git config user.name "GameDepot Test"
-
-C:\Dev\GameDepot\gamedepot.exe init --project PartyGame --template ue5
-C:\Dev\GameDepot\gamedepot.exe doctor
-```
-
-Create several test files:
+This does not require Unreal Engine. It creates fake `.umap`, `.uasset`, `.xlsx`, `.blend`, and `.zip` files and runs the full workflow.
 
 ```powershell
-New-Item -ItemType Directory -Force Content\Maps | Out-Null
-New-Item -ItemType Directory -Force Config | Out-Null
-New-Item -ItemType Directory -Force Source\PartyGame | Out-Null
-New-Item -ItemType Directory -Force External\Planning | Out-Null
-New-Item -ItemType Directory -Force Saved\Logs | Out-Null
-
-"fake map binary" | Out-File -Encoding utf8 Content\Maps\Main.umap
-"[/Script/EngineSettings.GameMapsSettings]" | Out-File -Encoding utf8 Config\DefaultGame.ini
-"// fake cpp" | Out-File -Encoding utf8 Source\PartyGame\GameMode.cpp
-"balance table" | Out-File -Encoding utf8 External\Planning\balance.txt
-"runtime log" | Out-File -Encoding utf8 Saved\Logs\Game.log
+.\GameDepot\gamedepot.exe smoke-test `
+  --workspace .\GameDepot_SmokeWorkspace `
+  --report .\gamedepot_smoke_report.md
 ```
 
-Check classification:
-
-```powershell
-C:\Dev\GameDepot\gamedepot.exe classify
-C:\Dev\GameDepot\gamedepot.exe classify Content\Maps\Main.umap
-C:\Dev\GameDepot\gamedepot.exe classify --json
-```
-
-Expected categories:
+The smoke test runs:
 
 ```text
-blob    Content/Maps/Main.umap
-git     Config/DefaultGame.ini
-git     Source/PartyGame/GameMode.cpp
-blob    External/Planning/balance.txt
-ignore  Saved/Logs/Game.log
-```
-
-Submit:
-
-```powershell
-C:\Dev\GameDepot\gamedepot.exe status
-C:\Dev\GameDepot\gamedepot.exe submit -m "initial GameDepot v0.2 test"
-C:\Dev\GameDepot\gamedepot.exe verify
-C:\Dev\GameDepot\gamedepot.exe ls
-```
-
-Test sync overwrite protection:
-
-```powershell
-"dirty local edit" | Out-File -Encoding utf8 Content\Maps\Main.umap
-
-C:\Dev\GameDepot\gamedepot.exe sync
-```
-
-Expected: it refuses to overwrite the local unsubmitted blob change.
-
-Force restore:
-
-```powershell
-C:\Dev\GameDepot\gamedepot.exe sync --force
-Get-Content Content\Maps\Main.umap
+git init
+init --template ue5
+config user
+doctor
+store check
+classify/status
+lock/locks
+submit/verify
+restore dirty protection
+second submit
+history
+delete-version dry-run/execute
+gc dry-run, including protected tag check
+sync/unlock/final verify
 ```
 
 ---
 
-## Commands
+## Aliyun OSS setup
+
+Create an OSS bucket in the Aliyun console first. Use a RAM AccessKey with permission to put, get, list, and delete objects in that bucket or project prefix.
+
+Add an OSS profile. Both argument orders are supported in v0.5.1:
+
+```powershell
+.\GameDepot\gamedepot.exe config add-oss aliyun-oss `
+  --region cn-hangzhou `
+  --bucket your-bucket-name
+```
+
+```powershell
+.\GameDepot\gamedepot.exe config add-oss `
+  --region cn-hangzhou `
+  --bucket your-bucket-name `
+  aliyun-oss
+```
+
+This creates an S3-compatible OSS profile with:
+
+```text
+endpoint: https://s3.oss-cn-hangzhou.aliyuncs.com
+force_path_style: false
+```
+
+Set credentials. Both argument orders are supported:
+
+```powershell
+.\GameDepot\gamedepot.exe config set-credentials aliyun-oss `
+  --access-key-id YOUR_ACCESS_KEY_ID `
+  --access-key-secret YOUR_ACCESS_KEY_SECRET
+```
+
+```powershell
+.\GameDepot\gamedepot.exe config set-credentials `
+  --access-key-id YOUR_ACCESS_KEY_ID `
+  --access-key-secret YOUR_ACCESS_KEY_SECRET `
+  aliyun-oss
+```
+
+Check profiles:
+
+```powershell
+.\GameDepot\gamedepot.exe config profiles
+```
+
+---
+
+## Aliyun OSS remote smoke test
+
+This uses your real global profile and credentials. It does **not** isolate `GAMEDEPOT_CONFIG_DIR`.
+
+```powershell
+.\GameDepot\gamedepot.exe remote-smoke-test `
+  --profile aliyun-oss `
+  --workspace .\GameDepot_OSS_SmokeWorkspace `
+  --report .\gamedepot_oss_smoke_report.md `
+  --project SimUEProjectOSS
+```
+
+The remote smoke test creates a simulated UE-style project, switches it to the `aliyun-oss` profile, uploads blobs to OSS, verifies remote blobs, restores files from OSS, tests locks, runs `delete-version`, runs `gc --dry-run`, and writes a markdown report.
+
+Because the project name becomes part of the store prefix, use a unique `--project` value when repeating remote tests if you want separate prefixes.
+
+---
+
+## Manual OSS project test
+
+Inside an existing GameDepot project:
+
+```powershell
+..\GameDepot\gamedepot.exe config project-use aliyun-oss
+..\GameDepot\gamedepot.exe store info
+..\GameDepot\gamedepot.exe store check
+..\GameDepot\gamedepot.exe submit -m "test aliyun oss"
+..\GameDepot\gamedepot.exe verify --remote-only
+```
+
+---
+
+## GC and delete-version
+
+Show candidates only:
+
+```powershell
+..\GameDepot\gamedepot.exe gc --dry-run
+```
+
+Protect a milestone tag while scanning:
+
+```powershell
+..\GameDepot\gamedepot.exe gc --dry-run --protect-tag milestone-v0.1
+```
+
+Protect all Git tags:
+
+```powershell
+..\GameDepot\gamedepot.exe gc --dry-run --protect-all-tags
+```
+
+Actually delete GC candidates:
+
+```powershell
+..\GameDepot\gamedepot.exe gc --execute
+```
+
+Delete one historical blob version:
+
+```powershell
+..\GameDepot\gamedepot.exe delete-version Content\Characters\Hero.uasset `
+  --sha256 FULL_64_CHAR_SHA256 `
+  --execute
+```
+
+Deleting the current manifest version is refused unless you pass `--force-current`.
+
+Executed deletions are logged to:
+
+```text
+.gamedepot/logs/deletions.jsonl
+```
+
+---
+
+## MinIO test
+
+Start MinIO:
+
+```powershell
+docker run -p 9000:9000 -p 9001:9001 `
+  -e "MINIO_ROOT_USER=minioadmin" `
+  -e "MINIO_ROOT_PASSWORD=minioadmin" `
+  quay.io/minio/minio server /data --console-address ":9001"
+```
+
+Create bucket `gamedepot-test` in the MinIO console, then:
+
+```powershell
+.\GameDepot\gamedepot.exe config add-s3 minio-local `
+  --endpoint http://127.0.0.1:9000 `
+  --region us-east-1 `
+  --bucket gamedepot-test `
+  --force-path-style
+
+.\GameDepot\gamedepot.exe config set-credentials minio-local `
+  --access-key-id minioadmin `
+  --access-key-secret minioadmin
+
+.\GameDepot\gamedepot.exe remote-smoke-test `
+  --profile minio-local `
+  --workspace .\GameDepot_MinIO_SmokeWorkspace `
+  --report .\gamedepot_minio_smoke_report.md
+```
+
+---
+
+## Main commands
 
 ```text
 gamedepot init --project my-game [--template ue5]
 gamedepot doctor
+gamedepot config path
+gamedepot config user [--name <name>] [--email <email>]
+gamedepot config profiles
+gamedepot config add-local <name> [--path <path>]
+gamedepot config add-oss <name> --region <region> --bucket <bucket> [--internal]
+gamedepot config add-s3 <name> --endpoint <url> --bucket <bucket> [--region <region>] [--force-path-style]
+gamedepot config set-credentials <profile> [--access-key-id <id>] [--access-key-secret <secret>]
+gamedepot config use <profile>
+gamedepot config project-use <profile>
+gamedepot smoke-test [--workspace <dir>] [--report <file>]
+gamedepot remote-smoke-test --profile <profile> [--workspace <dir>] [--report <file>]
+gamedepot store info
+gamedepot store check
 gamedepot classify [path] [--json] [--all]
 gamedepot status [--json]
 gamedepot submit -m "update assets"
 gamedepot sync [--force]
-gamedepot verify
+gamedepot verify [--local-only] [--remote-only]
 gamedepot ls [--all]
 gamedepot history <path>
-gamedepot restore <path> --sha256 <sha256> [--force]
+gamedepot restore <path> [--sha256 <sha256>] [--force]
+gamedepot lock <path> [--note <text>] [--force]
+gamedepot unlock <path> [--force]
+gamedepot locks [--json]
+gamedepot delete-version <path> --sha256 <sha256> [--dry-run|--execute] [--force-current]
+gamedepot gc [--dry-run|--execute] [--protect-tag <tag>] [--protect-all-tags] [--json]
 ```
-
----
-
-## Rule system
-
-`.gamedepot/config.yaml` contains rules like this:
-
-```yaml
-rules:
-  - pattern: Content/**/*.uasset
-    mode: blob
-    kind: unreal_asset
-
-  - pattern: Content/**/*.umap
-    mode: blob
-    kind: unreal_map
-
-  - pattern: Config/**
-    mode: git
-    kind: unreal_config
-
-  - pattern: Source/**
-    mode: git
-    kind: code
-
-  - pattern: Saved/**
-    mode: ignore
-    kind: unreal_generated
-```
-
-The first matching rule wins.
-
-Modes:
-
-```text
-blob    hash + upload to blob store + write manifest
-git     stage directly into Git
-ignore  skipped by GameDepot
-```
-
----
-
-## Default UE5 behavior
-
-Blob-managed:
-
-```text
-Content/**/*.uasset
-Content/**/*.umap
-External/Planning/**/*.xlsx
-External/Planning/**/*.xls
-External/Planning/**/*.csv
-External/Planning/**/*.txt
-External/Art/source/**
-External/Art/**/*.psd
-External/Art/**/*.blend
-External/Art/**/*.fbx
-External/Art/**/*.png
-External/SharedTools/**/*.zip
-External/SharedTools/**/*.7z
-External/SharedTools/**/*.exe
-```
-
-Git-managed:
-
-```text
-*.uproject
-Config/**
-Source/**
-Plugins/**/*.uplugin
-Plugins/**/Source/**
-Docs/**
-External/WebLinks/**/*.url
-External/Tech/**/*.py
-External/Tech/**/*.ps1
-External/Tech/**/*.bat
-External/Launchers/**/*.bat
-External/Launchers/**/*.ps1
-External/**/*.md
-External/**/*.url
-```
-
-Ignored:
-
-```text
-.git/**
-.gamedepot/cache/**
-.gamedepot/tmp/**
-.gamedepot/logs/**
-.gamedepot/remote_blobs/**
-Binaries/**
-Build/**
-DerivedDataCache/**
-Intermediate/**
-Saved/**
-.vs/**
-```
-
----
-
-## Verify checks
-
-`gamedepot verify` now checks:
-
-- manifest readability
-- unsafe paths
-- missing blob objects
-- blob hash mismatch
-- local blob mismatch against manifest
-- manifest entries that no longer match blob rules
-- blob-managed files accidentally tracked by Git
-- ignored files tracked by Git
-- git-managed files not yet tracked
-
-If a blob-managed file is already tracked by Git, fix it with:
-
-```bash
-git rm --cached -- Content/Maps/Main.umap
-gamedepot submit -m "move Main.umap to GameDepot blob store"
-```
-
----
-
-## Suggested next version
-
-v0.3 should add a real object-store provider:
-
-```text
-internal/store/s3_store.go
-internal/store/provider.go
-```
-
-Target configuration:
-
-```yaml
-store:
-  type: s3
-  endpoint: oss-cn-hangzhou.aliyuncs.com
-  bucket: gamedepot-test
-  region: cn-hangzhou
-  prefix: projects/party-game/blobs
-```
-
-Secrets should come from environment variables, not config files.

@@ -68,6 +68,10 @@ func Load(root string) (Config, error) {
 		switch section {
 		case "store":
 			switch key {
+			case "profile":
+				cfg.Store.Profile = value
+			case "prefix":
+				cfg.Store.Prefix = value
 			case "type":
 				cfg.Store.Type = value
 			case "root":
@@ -97,8 +101,17 @@ func Load(root string) (Config, error) {
 	if cfg.ManifestPath == "" {
 		return Config{}, errors.New("manifest_path is required")
 	}
-	if cfg.Store.Type == "" {
-		return Config{}, errors.New("store.type is required")
+	if cfg.Store.Profile == "" && cfg.Store.Type == "" {
+		return Config{}, errors.New("store.profile is required")
+	}
+	if cfg.Store.Profile == "" && cfg.Store.Type == "local" {
+		cfg.Store.Profile = "local"
+	}
+	if cfg.Store.Prefix == "" {
+		cfg.Store.Prefix = DefaultStorePrefix(cfg.ProjectID)
+	}
+	if cfg.Store.Root == "" && cfg.Store.Type == "local" {
+		cfg.Store.Root = ".gamedepot/remote_blobs"
 	}
 	if len(cfg.Rules) == 0 {
 		defaults := DefaultConfig(cfg.ProjectID)
@@ -118,14 +131,21 @@ func Save(root string, cfg Config) error {
 		return err
 	}
 
+	if cfg.Store.Profile == "" && cfg.Store.Type == "local" {
+		cfg.Store.Profile = "local"
+	}
+	if cfg.Store.Prefix == "" {
+		cfg.Store.Prefix = DefaultStorePrefix(cfg.ProjectID)
+	}
+
 	var b strings.Builder
 
 	fmt.Fprintf(&b, "project_id: %s\n\n", cfg.ProjectID)
 	fmt.Fprintf(&b, "manifest_path: %s\n\n", cfg.ManifestPath)
 
 	fmt.Fprintf(&b, "store:\n")
-	fmt.Fprintf(&b, "  type: %s\n", cfg.Store.Type)
-	fmt.Fprintf(&b, "  root: %s\n\n", cfg.Store.Root)
+	fmt.Fprintf(&b, "  profile: %s\n", cfg.Store.Profile)
+	fmt.Fprintf(&b, "  prefix: %s\n\n", cfg.Store.Prefix)
 
 	fmt.Fprintf(&b, "include:\n")
 	for _, v := range cfg.Include {

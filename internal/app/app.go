@@ -2,7 +2,6 @@ package app
 
 import (
 	"context"
-	"fmt"
 	"path/filepath"
 
 	"github.com/1051093860/gamedepot/internal/config"
@@ -13,6 +12,7 @@ type App struct {
 	Root         string
 	Config       config.Config
 	Store        store.BlobStore
+	StoreInfo    store.Info
 	ManifestPath string
 }
 
@@ -27,13 +27,9 @@ func Load(ctx context.Context, start string) (*App, error) {
 		return nil, err
 	}
 
-	var bs store.BlobStore
-
-	switch cfg.Store.Type {
-	case "local":
-		bs = store.NewLocalBlobStore(filepath.Join(root, cfg.Store.Root))
-	default:
-		return nil, fmt.Errorf("unsupported store.type %q", cfg.Store.Type)
+	bs, info, err := store.NewFromProject(root, cfg)
+	if err != nil {
+		return nil, err
 	}
 
 	select {
@@ -46,6 +42,7 @@ func Load(ctx context.Context, start string) (*App, error) {
 		Root:         root,
 		Config:       cfg,
 		Store:        bs,
+		StoreInfo:    info,
 		ManifestPath: filepath.Join(root, cfg.ManifestPath),
 	}, nil
 }

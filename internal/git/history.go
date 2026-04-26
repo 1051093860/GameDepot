@@ -37,3 +37,11 @@ func (g Git) LogFile(path string) ([]CommitInfo, error) {
 func (g Git) ShowFileAtCommit(commit string, path string) (string, error) {
 	return g.Run("show", commit+":"+path)
 }
+
+func (g Git) Tags() ([]string, error) {
+	out, err := g.Run("tag", "--list")
+	if err != nil {
+		return nil, err
+	}
+	return splitLines(out), nil
+}

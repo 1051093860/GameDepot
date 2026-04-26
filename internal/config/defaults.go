@@ -8,6 +8,13 @@ import (
 
 const DefaultTemplate = "ue5"
 
+func DefaultStorePrefix(projectID string) string {
+	if projectID == "" {
+		projectID = "my-game"
+	}
+	return "projects/" + projectID + "/blobs"
+}
+
 func ConfigForTemplate(projectID string, template string) (Config, error) {
 	if projectID == "" {
 		projectID = "my-game"
@@ -39,8 +46,10 @@ func baseConfig(projectID string, ruleSet []rules.Rule) Config {
 		ProjectID:    projectID,
 		ManifestPath: "depot/manifests/main.gdmanifest.json",
 		Store: StoreConfig{
-			Type: "local",
-			Root: ".gamedepot/remote_blobs",
+			Profile: "local",
+			Prefix:  DefaultStorePrefix(projectID),
+			Type:    "local",
+			Root:    ".gamedepot/remote_blobs",
 		},
 		Include: []string{"**/*"},
 		Exclude: []string{
