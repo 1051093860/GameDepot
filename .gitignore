@@ -1,0 +1,14 @@
+# Build outputs
+gamedepot
+gamedepot.exe
+*.test
+
+# Editor
+.idea/
+
+# Runtime test projects
+GDTest/
+
+# OS
+.DS_Store
+Thumbs.db

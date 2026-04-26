@@ -1,0 +1,25 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "go: build gamedepot",
+      "type": "shell",
+      "command": "go build ./cmd/gamedepot",
+      "group": "build",
+      "problemMatcher": "$go"
+    },
+    {
+      "label": "go: test all",
+      "type": "shell",
+      "command": "go test ./...",
+      "group": "test",
+      "problemMatcher": "$go"
+    },
+    {
+      "label": "go: fmt all",
+      "type": "shell",
+      "command": "go fmt ./...",
+      "problemMatcher": []
+    }
+  ]
+}
