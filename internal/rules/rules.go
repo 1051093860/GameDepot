@@ -21,14 +21,23 @@ type Rule struct {
 }
 
 type Match struct {
-	Matched bool
-	Rule    Rule
+	Matched bool `json:"matched"`
+	Rule    Rule `json:"rule"`
+}
+
+type FileClass struct {
+	Path        string `json:"path"`
+	Mode        Mode   `json:"mode"`
+	Kind        string `json:"kind,omitempty"`
+	RulePattern string `json:"rule_pattern,omitempty"`
+	Matched     bool   `json:"matched"`
 }
 
 func Classify(rel string, rules []Rule) Match {
 	rel = normalizeRel(rel)
 
 	for _, rule := range rules {
+		rule = normalizeRule(rule)
 		if rule.Pattern == "" {
 			continue
 		}
@@ -38,10 +47,25 @@ func Classify(rel string, rules []Rule) Match {
 			continue
 		}
 
-		return Match{Matched: true, Rule: normalizeRule(rule)}
+		return Match{Matched: true, Rule: rule}
 	}
 
 	return Match{}
+}
+
+func FileClassFor(rel string, ruleSet []Rule) FileClass {
+	rel = normalizeRel(rel)
+	match := Classify(rel, ruleSet)
+	if !match.Matched {
+		return FileClass{Path: rel, Mode: ModeIgnore, Kind: "unmatched", Matched: false}
+	}
+	return FileClass{
+		Path:        rel,
+		Mode:        match.Rule.Mode,
+		Kind:        match.Rule.Kind,
+		RulePattern: match.Rule.Pattern,
+		Matched:     true,
+	}
 }
 
 func ValidateMode(mode Mode) error {
@@ -51,6 +75,27 @@ func ValidateMode(mode Mode) error {
 	default:
 		return fmt.Errorf("unsupported rule mode %q", mode)
 	}
+}
+
+func ValidateRules(ruleSet []Rule) error {
+	if len(ruleSet) == 0 {
+		return fmt.Errorf("at least one rule is required")
+	}
+
+	for i, rule := range ruleSet {
+		rule = normalizeRule(rule)
+		if rule.Pattern == "" {
+			return fmt.Errorf("rules[%d].pattern is required", i)
+		}
+		if err := ValidateMode(rule.Mode); err != nil {
+			return fmt.Errorf("rules[%d]: %w", i, err)
+		}
+		if _, err := regexp.Compile("^" + globToRegex(rule.Pattern) + "$"); err != nil {
+			return fmt.Errorf("rules[%d].pattern %q is invalid: %w", i, rule.Pattern, err)
+		}
+	}
+
+	return nil
 }
 
 func GlobMatch(pattern string, rel string) (bool, error) {

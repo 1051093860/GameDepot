@@ -105,13 +105,8 @@ func Load(root string) (Config, error) {
 		cfg.Rules = defaults.Rules
 	}
 
-	for _, rule := range cfg.Rules {
-		if rule.Pattern == "" {
-			return Config{}, errors.New("rules[].pattern is required")
-		}
-		if err := rules.ValidateMode(rule.Mode); err != nil {
-			return Config{}, err
-		}
+	if err := rules.ValidateRules(cfg.Rules); err != nil {
+		return Config{}, err
 	}
 
 	return cfg, nil

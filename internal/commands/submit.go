@@ -62,7 +62,6 @@ func Submit(ctx context.Context, start string, message string) error {
 			}
 
 			_ = in.Close()
-
 			fmt.Printf("uploaded %s %s\n", shortSHA(f.SHA256), f.Path)
 		}
 
@@ -95,6 +94,9 @@ func Submit(ctx context.Context, start string, message string) error {
 		".gamedepot/config.yaml",
 		".gitignore",
 		a.Config.ManifestPath,
+		"Config",
+		"Source",
+		"Docs",
 		"External/WebLinks",
 		"External/Tech",
 		"External/Launchers",
