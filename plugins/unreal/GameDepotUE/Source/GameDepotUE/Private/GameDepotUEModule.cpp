@@ -15,6 +15,7 @@
 #include "Interfaces/IHttpRequest.h"
 #include "Interfaces/IHttpResponse.h"
 #include "HAL/FileManager.h"
+#include "HAL/PlatformMisc.h"
 #include "Misc/App.h"
 #include "Misc/ConfigCacheIni.h"
 #include "Misc/FileHelper.h"
@@ -90,6 +91,96 @@ FString QuoteJSON(const FString& S)
 {
     return FString::Printf(TEXT("\"%s\""), *JsonEscape(S));
 }
+
+
+FString TrimExecutableToken(FString Value)
+{
+    Value = Value.TrimStartAndEnd();
+    if ((Value.StartsWith(TEXT("\"")) && Value.EndsWith(TEXT("\""))) ||
+        (Value.StartsWith(TEXT("'")) && Value.EndsWith(TEXT("'"))))
+    {
+        Value = Value.Mid(1, Value.Len() - 2).TrimStartAndEnd();
+    }
+    return Value;
+}
+
+FString ResolveExecutableFromPATH(const FString& ExecutableName)
+{
+    FString Name = TrimExecutableToken(ExecutableName);
+    if (Name.IsEmpty())
+    {
+        return FString();
+    }
+
+    if (FPaths::FileExists(Name))
+    {
+        return FPaths::ConvertRelativePathToFull(Name);
+    }
+
+    TArray<FString> NamesToTry;
+    NamesToTry.AddUnique(Name);
+#if PLATFORM_WINDOWS
+    if (FPaths::GetExtension(Name, false).IsEmpty())
+    {
+        NamesToTry.AddUnique(Name + TEXT(".exe"));
+    }
+#endif
+
+    const FString PathValue = FPlatformMisc::GetEnvironmentVariable(TEXT("PATH"));
+    TArray<FString> PathDirs;
+#if PLATFORM_WINDOWS
+    PathValue.ParseIntoArray(PathDirs, TEXT(";"), true);
+#else
+    PathValue.ParseIntoArray(PathDirs, TEXT(":"), true);
+#endif
+
+    for (FString Dir : PathDirs)
+    {
+        Dir = TrimExecutableToken(Dir);
+        if (Dir.IsEmpty())
+        {
+            continue;
+        }
+
+        for (const FString& CandidateName : NamesToTry)
+        {
+            const FString Candidate = FPaths::ConvertRelativePathToFull(FPaths::Combine(Dir, CandidateName));
+            if (FPaths::FileExists(Candidate))
+            {
+                return Candidate;
+            }
+        }
+    }
+
+    return FString();
+}
+
+FString ResolveGameDepotExecutable(const FString& PreferredExecutable)
+{
+    if (!PreferredExecutable.TrimStartAndEnd().IsEmpty())
+    {
+        const FString ResolvedPreferred = ResolveExecutableFromPATH(PreferredExecutable);
+        if (!ResolvedPreferred.IsEmpty())
+        {
+            return ResolvedPreferred;
+        }
+    }
+
+    const FString ResolvedNormalName = ResolveExecutableFromPATH(TEXT("gamedepot.exe"));
+    if (!ResolvedNormalName.IsEmpty())
+    {
+        return ResolvedNormalName;
+    }
+
+    // Tolerate the typo while local binaries or user settings are being renamed.
+    const FString ResolvedTypoName = ResolveExecutableFromPATH(TEXT("gamedeport.exe"));
+    if (!ResolvedTypoName.IsEmpty())
+    {
+        return ResolvedTypoName;
+    }
+
+    return FString();
+}
 }
 
 void FGameDepotUEModule::StartupModule()
@@ -125,12 +216,15 @@ void FGameDepotUEModule::ShutdownModule()
 
 void FGameDepotUEModule::LoadSettings()
 {
+    FString ConfiguredGameDepotExe;
+    FString ConfiguredDaemonExe;
+
     if (GConfig)
     {
         GConfig->GetBool(TEXT("GameDepotUE"), TEXT("MockMode"), bMockMode, GGameIni);
         GConfig->GetInt(TEXT("GameDepotUE"), TEXT("MaxMockAssets"), MaxMockAssets, GGameIni);
-        GConfig->GetString(TEXT("GameDepotUE"), TEXT("GameDepotExecutable"), GameDepotExe, GGameIni);
-        GConfig->GetString(TEXT("GameDepotUE"), TEXT("GameDepotDaemonExecutable"), GameDepotDaemonExe, GGameIni);
+        GConfig->GetString(TEXT("GameDepotUE"), TEXT("GameDepotExecutable"), ConfiguredGameDepotExe, GGameIni);
+        GConfig->GetString(TEXT("GameDepotUE"), TEXT("GameDepotDaemonExecutable"), ConfiguredDaemonExe, GGameIni);
         GConfig->GetBool(TEXT("GameDepotUE"), TEXT("AutoStartDaemon"), bAutoStartDaemon, GGameIni);
         GConfig->GetBool(TEXT("GameDepotUE"), TEXT("AutoShutdownDaemon"), bAutoShutdownDaemon, GGameIni);
         GConfig->GetString(TEXT("GameDepotUE"), TEXT("DaemonListenAddress"), DaemonListenAddress, GGameIni);
@@ -138,20 +232,31 @@ void FGameDepotUEModule::LoadSettings()
     MaxMockAssets = FMath::Clamp(MaxMockAssets, 20, 5000);
     if (DaemonListenAddress.IsEmpty()) DaemonListenAddress = TEXT("127.0.0.1:0");
 
-    TArray<FString> Candidates;
-    if (!GameDepotExe.IsEmpty()) Candidates.Add(GameDepotExe);
-    Candidates.Add(FPaths::ConvertRelativePathToFull(FPaths::Combine(ProjectRoot, TEXT(".."), TEXT("GameDepot"), TEXT("gamedepot.exe"))));
-    Candidates.Add(FPaths::ConvertRelativePathToFull(FPaths::Combine(ProjectRoot, TEXT(".."), TEXT("gamedepot.exe"))));
-    Candidates.Add(FPaths::ConvertRelativePathToFull(FPaths::Combine(ProjectRoot, TEXT("gamedepot.exe"))));
-    for (const FString& Candidate : Candidates)
+    GameDepotExe = ResolveGameDepotExecutable(ConfiguredGameDepotExe);
+
+    if (GameDepotExe.IsEmpty())
     {
-        if (FPaths::FileExists(Candidate))
+        TArray<FString> ProjectRelativeCandidates;
+        ProjectRelativeCandidates.Add(FPaths::ConvertRelativePathToFull(FPaths::Combine(ProjectRoot, TEXT(".."), TEXT("GameDepot"), TEXT("gamedepot.exe"))));
+        ProjectRelativeCandidates.Add(FPaths::ConvertRelativePathToFull(FPaths::Combine(ProjectRoot, TEXT(".."), TEXT("gamedepot.exe"))));
+        ProjectRelativeCandidates.Add(FPaths::ConvertRelativePathToFull(FPaths::Combine(ProjectRoot, TEXT("gamedepot.exe"))));
+        for (const FString& Candidate : ProjectRelativeCandidates)
         {
-            GameDepotExe = Candidate;
-            break;
+            if (FPaths::FileExists(Candidate))
+            {
+                GameDepotExe = Candidate;
+                break;
+            }
         }
     }
-    if (GameDepotDaemonExe.IsEmpty()) GameDepotDaemonExe = GameDepotExe;
+
+    GameDepotDaemonExe = ResolveGameDepotExecutable(ConfiguredDaemonExe);
+    if (GameDepotDaemonExe.IsEmpty())
+    {
+        GameDepotDaemonExe = GameDepotExe;
+    }
+
+    UE_LOG(LogGameDepotUE, Display, TEXT("Resolved GameDepot executable: %s"), GameDepotExe.IsEmpty() ? TEXT("<not found>") : *GameDepotExe);
 }
 
 void FGameDepotUEModule::RegisterMenus()
@@ -292,7 +397,7 @@ void FGameDepotUEModule::InitializeWorkspace()
     }
     if (GameDepotExe.IsEmpty() || !FPaths::FileExists(GameDepotExe))
     {
-        SetToolbarState(EGameDepotToolbarState::Error, TEXT("gamedepot.exe not found. Set GameDepotExecutable in DefaultGameDepotUE.ini."));
+        SetToolbarState(EGameDepotToolbarState::Error, TEXT("gamedepot.exe not found in PATH or project fallback paths. Set GameDepotExecutable in DefaultGameDepotUE.ini."));
         Notify(ToolbarStateMessage);
         return;
     }
@@ -562,7 +667,7 @@ bool FGameDepotUEModule::LaunchDaemon()
     const FString Exe = FPaths::FileExists(GameDepotDaemonExe) ? GameDepotDaemonExe : GameDepotExe;
     if (Exe.IsEmpty() || !FPaths::FileExists(Exe))
     {
-        SetToolbarState(EGameDepotToolbarState::Error, TEXT("gamedepot.exe not found. Set GameDepotExecutable in DefaultGameDepotUE.ini."));
+        SetToolbarState(EGameDepotToolbarState::Error, TEXT("gamedepot.exe not found in PATH or project fallback paths. Set GameDepotExecutable in DefaultGameDepotUE.ini."));
         Notify(ToolbarStateMessage);
         return false;
     }

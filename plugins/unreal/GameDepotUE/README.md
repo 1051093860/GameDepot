@@ -22,11 +22,13 @@ Install:
 
 1. Replace `UEProject/Plugins/GameDepotUE` with this folder.
 2. Make sure the Go side is built and `v08-core-smoke-test` pass.
-3. If the plugin cannot find `gamedepot.exe`, set `GameDepotExecutable` in `Config/DefaultGameDepotUE.ini`.
+3. Build `gamedepot.exe` and put its directory in the system `PATH`, or set `GameDepotExecutable` in `Config/DefaultGameDepotUE.ini`.
 
 Default executable discovery tries:
 
-- `GameDepotExecutable` setting
+- `GameDepotExecutable` setting; this may be an absolute path or a binary name resolvable from `PATH`
+- `gamedepot.exe` from the system `PATH`
+- `gamedeport.exe` from the system `PATH` as a compatibility fallback for the old typo
 - `<UEProject>/../GameDepot/gamedepot.exe`
 - `<UEProject>/../gamedepot.exe`
 - `<UEProject>/gamedepot.exe`
