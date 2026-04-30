@@ -1,6 +1,6 @@
 # Build outputs
-gamedepot
-gamedepot.exe
+/gamedepot
+/gamedepot.exe
 *.test
 
 # Editor
