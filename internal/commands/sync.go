@@ -13,12 +13,25 @@ import (
 	"github.com/1051093860/gamedepot/internal/workspace"
 )
 
+type SyncOptions struct {
+	Force bool
+}
+
 func Sync(ctx context.Context, start string, force bool) error {
+	return SyncWithOptions(ctx, start, SyncOptions{Force: force})
+}
+
+// Sync restores blob-routed files for the currently checked-out Git version.
+// It intentionally does not run git pull; use `gamedepot pull` separately.
+func SyncWithOptions(ctx context.Context, start string, opts SyncOptions) error {
 	a, err := app.Load(ctx, start)
 	if err != nil {
 		return err
 	}
+	return syncBlobs(ctx, a, opts.Force)
+}
 
+func syncBlobs(ctx context.Context, a *app.App, force bool) error {
 	m, err := manifest.Load(a.ManifestPath)
 	if err != nil {
 		return err
@@ -29,6 +42,12 @@ func Sync(ctx context.Context, start string, force bool) error {
 	skipped := 0
 
 	for _, e := range m.Entries {
+		if !workspace.IsGameDepotManagedPath(e.Path) {
+			continue
+		}
+		if e.Storage != manifest.StorageBlob {
+			continue
+		}
 		if _, err := workspace.CleanRelPath(e.Path); err != nil {
 			return fmt.Errorf("unsafe manifest entry %q: %w", e.Path, err)
 		}

@@ -137,7 +137,7 @@ func DeleteVersion(ctx context.Context, a *app.App, targetPath string, sha strin
 		return DeleteVersionResult{}, err
 	}
 	current, isCurrent := m.Entries[targetPath]
-	wasCurrent := isCurrent && !current.Deleted && strings.EqualFold(current.SHA256, sha)
+	wasCurrent := isCurrent && !current.Deleted && current.Storage == manifest.StorageBlob && strings.EqualFold(current.SHA256, sha)
 	if wasCurrent && !opts.ForceCurrent {
 		return DeleteVersionResult{}, fmt.Errorf("refusing to delete the current manifest version for %s; pass --force-current if you really want to break current restore", targetPath)
 	}
@@ -220,7 +220,7 @@ func referencedSet(ctx context.Context, a *app.App, opts Options) (map[string]st
 
 func addManifestRefs(out map[string]struct{}, m manifest.Manifest) {
 	for _, e := range m.Entries {
-		if e.Deleted || e.SHA256 == "" {
+		if e.Deleted || e.Storage != manifest.StorageBlob || e.SHA256 == "" {
 			continue
 		}
 		out[strings.ToLower(e.SHA256)] = struct{}{}
@@ -230,7 +230,7 @@ func addManifestRefs(out map[string]struct{}, m manifest.Manifest) {
 func countManifestRefs(m manifest.Manifest) int {
 	n := 0
 	for _, e := range m.Entries {
-		if !e.Deleted && e.SHA256 != "" {
+		if !e.Deleted && e.Storage == manifest.StorageBlob && e.SHA256 != "" {
 			n++
 		}
 	}
@@ -290,7 +290,7 @@ func ShaAppearsInManifestHistory(root string, manifestPath string, targetPath st
 		if err := json.Unmarshal([]byte(raw), &m); err != nil {
 			continue
 		}
-		if e, ok := m.Entries[targetPath]; ok && strings.EqualFold(e.SHA256, sha) {
+		if e, ok := m.Entries[targetPath]; ok && e.Storage == manifest.StorageBlob && strings.EqualFold(e.SHA256, sha) {
 			return true, nil
 		}
 	}

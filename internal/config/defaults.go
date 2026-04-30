@@ -51,12 +51,14 @@ func baseConfig(projectID string, ruleSet []rules.Rule) Config {
 			Type:    "local",
 			Root:    ".gamedepot/remote_blobs",
 		},
+		Git:     DefaultGitConfig(),
 		Include: []string{"**/*"},
 		Exclude: []string{
 			".git/**",
 			".gamedepot/cache/**",
 			".gamedepot/tmp/**",
 			".gamedepot/logs/**",
+			".gamedepot/runtime/**",
 			".gamedepot/remote_blobs/**",
 		},
 		Rules: ruleSet,
@@ -69,7 +71,10 @@ func BasicConfig(projectID string) Config {
 		{Pattern: ".gamedepot/cache/**", Mode: rules.ModeIgnore, Kind: "runtime"},
 		{Pattern: ".gamedepot/tmp/**", Mode: rules.ModeIgnore, Kind: "runtime"},
 		{Pattern: ".gamedepot/logs/**", Mode: rules.ModeIgnore, Kind: "runtime"},
+		{Pattern: ".gamedepot/runtime/**", Mode: rules.ModeIgnore, Kind: "runtime"},
 		{Pattern: ".gamedepot/remote_blobs/**", Mode: rules.ModeIgnore, Kind: "runtime"},
+		{Pattern: ".gamedepot/config.yaml", Mode: rules.ModeGit, Kind: "gamedepot_config"},
+		{Pattern: "depot/manifests/**", Mode: rules.ModeGit, Kind: "gamedepot_manifest"},
 		{Pattern: "External/Planning/**/*.xlsx", Mode: rules.ModeBlob, Kind: "planning_excel"},
 		{Pattern: "External/Planning/**/*.xls", Mode: rules.ModeBlob, Kind: "planning_excel"},
 		{Pattern: "External/SharedTools/**/*.zip", Mode: rules.ModeBlob, Kind: "tool_package"},
@@ -85,14 +90,21 @@ func UE5Config(projectID string) Config {
 
 func DefaultUE5Rules() []rules.Rule {
 	return []rules.Rule{
-		// GameDepot runtime and VCS internals.
+		// GameDepot runtime and VCS internals. These are protected rules and should stay first.
 		{Pattern: ".git/**", Mode: rules.ModeIgnore, Kind: "runtime"},
 		{Pattern: ".gamedepot/cache/**", Mode: rules.ModeIgnore, Kind: "runtime"},
 		{Pattern: ".gamedepot/tmp/**", Mode: rules.ModeIgnore, Kind: "runtime"},
 		{Pattern: ".gamedepot/logs/**", Mode: rules.ModeIgnore, Kind: "runtime"},
+		{Pattern: ".gamedepot/runtime/**", Mode: rules.ModeIgnore, Kind: "runtime"},
 		{Pattern: ".gamedepot/remote_blobs/**", Mode: rules.ModeIgnore, Kind: "runtime"},
 
-		// Unreal generated / local-only directories.
+		// GameDepot project metadata stays in Git, but is not written into the asset manifest.
+		{Pattern: ".gamedepot/config.yaml", Mode: rules.ModeGit, Kind: "gamedepot_config"},
+		{Pattern: "depot/manifests/**", Mode: rules.ModeGit, Kind: "gamedepot_manifest"},
+		{Pattern: ".gitignore", Mode: rules.ModeGit, Kind: "git_config"},
+		{Pattern: ".gitattributes", Mode: rules.ModeGit, Kind: "git_config"},
+
+		// Unreal generated / local-only directories. Non-Content project files are handled directly by Git.
 		{Pattern: "Binaries/**", Mode: rules.ModeIgnore, Kind: "unreal_generated"},
 		{Pattern: "Build/**", Mode: rules.ModeIgnore, Kind: "unreal_generated"},
 		{Pattern: "DerivedDataCache/**", Mode: rules.ModeIgnore, Kind: "unreal_generated"},
@@ -100,46 +112,37 @@ func DefaultUE5Rules() []rules.Rule {
 		{Pattern: "Saved/**", Mode: rules.ModeIgnore, Kind: "unreal_generated"},
 		{Pattern: ".vs/**", Mode: rules.ModeIgnore, Kind: "ide_cache"},
 
-		// Unreal binary assets go through the blob store.
+		// GameDepot only routes files under Content/**. Binary UE assets go through the blob store.
 		{Pattern: "Content/**/*.uasset", Mode: rules.ModeBlob, Kind: "unreal_asset"},
 		{Pattern: "Content/**/*.umap", Mode: rules.ModeBlob, Kind: "unreal_map"},
+		{Pattern: "Content/**/*.ubulk", Mode: rules.ModeBlob, Kind: "unreal_bulk"},
+		{Pattern: "Content/**/*.uexp", Mode: rules.ModeBlob, Kind: "unreal_export"},
+		{Pattern: "Content/**/*.uptnl", Mode: rules.ModeBlob, Kind: "unreal_binary"},
 
-		// Project and source files stay in Git.
-		{Pattern: "*.uproject", Mode: rules.ModeGit, Kind: "unreal_project"},
-		{Pattern: "Config/**", Mode: rules.ModeGit, Kind: "unreal_config"},
-		{Pattern: "Source/**", Mode: rules.ModeGit, Kind: "code"},
-		{Pattern: "Plugins/**/*.uplugin", Mode: rules.ModeGit, Kind: "unreal_plugin"},
-		{Pattern: "Plugins/**/Source/**", Mode: rules.ModeGit, Kind: "code"},
-		{Pattern: "Docs/**", Mode: rules.ModeGit, Kind: "document"},
-		{Pattern: "README.md", Mode: rules.ModeGit, Kind: "document"},
-		{Pattern: "LICENSE", Mode: rules.ModeGit, Kind: "document"},
+		// Raw media / import sources accidentally or intentionally stored under Content.
+		{Pattern: "Content/**/*.wav", Mode: rules.ModeBlob, Kind: "media_audio"},
+		{Pattern: "Content/**/*.ogg", Mode: rules.ModeBlob, Kind: "media_audio"},
+		{Pattern: "Content/**/*.mp3", Mode: rules.ModeBlob, Kind: "media_audio"},
+		{Pattern: "Content/**/*.flac", Mode: rules.ModeBlob, Kind: "media_audio"},
+		{Pattern: "Content/**/*.mp4", Mode: rules.ModeBlob, Kind: "media_video"},
+		{Pattern: "Content/**/*.mov", Mode: rules.ModeBlob, Kind: "media_video"},
+		{Pattern: "Content/**/*.avi", Mode: rules.ModeBlob, Kind: "media_video"},
+		{Pattern: "Content/**/*.png", Mode: rules.ModeBlob, Kind: "texture_source"},
+		{Pattern: "Content/**/*.jpg", Mode: rules.ModeBlob, Kind: "texture_source"},
+		{Pattern: "Content/**/*.jpeg", Mode: rules.ModeBlob, Kind: "texture_source"},
+		{Pattern: "Content/**/*.tga", Mode: rules.ModeBlob, Kind: "texture_source"},
+		{Pattern: "Content/**/*.exr", Mode: rules.ModeBlob, Kind: "texture_source"},
+		{Pattern: "Content/**/*.hdr", Mode: rules.ModeBlob, Kind: "texture_source"},
+		{Pattern: "Content/**/*.fbx", Mode: rules.ModeBlob, Kind: "model_source"},
+		{Pattern: "Content/**/*.obj", Mode: rules.ModeBlob, Kind: "model_source"},
+		{Pattern: "Content/**/*.gltf", Mode: rules.ModeBlob, Kind: "model_source"},
+		{Pattern: "Content/**/*.glb", Mode: rules.ModeBlob, Kind: "model_source"},
 
-		// Planning and art source files usually need binary history and restore.
-		{Pattern: "External/Planning/**/*.xlsx", Mode: rules.ModeBlob, Kind: "planning_excel"},
-		{Pattern: "External/Planning/**/*.xls", Mode: rules.ModeBlob, Kind: "planning_excel"},
-		{Pattern: "External/Planning/**/*.csv", Mode: rules.ModeBlob, Kind: "planning_table"},
-		{Pattern: "External/Planning/**/*.txt", Mode: rules.ModeBlob, Kind: "planning_note"},
-		{Pattern: "External/Art/source/**", Mode: rules.ModeBlob, Kind: "art_source"},
-		{Pattern: "External/Art/**/*.psd", Mode: rules.ModeBlob, Kind: "art_source"},
-		{Pattern: "External/Art/**/*.blend", Mode: rules.ModeBlob, Kind: "art_source"},
-		{Pattern: "External/Art/**/*.fbx", Mode: rules.ModeBlob, Kind: "art_export"},
-		{Pattern: "External/Art/**/*.png", Mode: rules.ModeBlob, Kind: "art_export"},
-		{Pattern: "External/Art/**/*.jpg", Mode: rules.ModeBlob, Kind: "art_export"},
-		{Pattern: "External/Art/**/*.jpeg", Mode: rules.ModeBlob, Kind: "art_export"},
-		{Pattern: "External/SharedTools/**/*.zip", Mode: rules.ModeBlob, Kind: "tool_package"},
-		{Pattern: "External/SharedTools/**/*.7z", Mode: rules.ModeBlob, Kind: "tool_package"},
-		{Pattern: "External/SharedTools/**/*.exe", Mode: rules.ModeBlob, Kind: "tool_binary"},
-
-		// Lightweight external-workspace entries stay in Git.
-		{Pattern: "External/WebLinks/**/*.url", Mode: rules.ModeGit, Kind: "shortcut"},
-		{Pattern: "External/WebLinks/**/*.md", Mode: rules.ModeGit, Kind: "document"},
-		{Pattern: "External/Tech/**/*.py", Mode: rules.ModeGit, Kind: "script"},
-		{Pattern: "External/Tech/**/*.ps1", Mode: rules.ModeGit, Kind: "script"},
-		{Pattern: "External/Tech/**/*.bat", Mode: rules.ModeGit, Kind: "script"},
-		{Pattern: "External/Tech/**/*.md", Mode: rules.ModeGit, Kind: "document"},
-		{Pattern: "External/Launchers/**/*.bat", Mode: rules.ModeGit, Kind: "launcher"},
-		{Pattern: "External/Launchers/**/*.ps1", Mode: rules.ModeGit, Kind: "launcher"},
-		{Pattern: "External/**/*.md", Mode: rules.ModeGit, Kind: "document"},
-		{Pattern: "External/**/*.url", Mode: rules.ModeGit, Kind: "shortcut"},
+		// Small text/data files under Content can remain Git-managed.
+		{Pattern: "Content/**/*.csv", Mode: rules.ModeGit, Kind: "data_source"},
+		{Pattern: "Content/**/*.json", Mode: rules.ModeGit, Kind: "data_source"},
+		{Pattern: "Content/**/*.txt", Mode: rules.ModeGit, Kind: "text"},
+		{Pattern: "Content/**/*.md", Mode: rules.ModeGit, Kind: "document"},
+		{Pattern: "Content/**/*.ini", Mode: rules.ModeGit, Kind: "config"},
 	}
 }

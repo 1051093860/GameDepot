@@ -13,6 +13,7 @@ func TestScanUsesRules(t *testing.T) {
 	root := t.TempDir()
 	mustWrite(t, filepath.Join(root, "Content", "A.uasset"), "asset")
 	mustWrite(t, filepath.Join(root, "External", "Tech", "tool.py"), "print('x')")
+	mustWrite(t, filepath.Join(root, "Content", "Data", "table.csv"), "id,name\n1,A")
 	mustWrite(t, filepath.Join(root, "Saved", "ignored.uasset"), "ignored")
 
 	cfg := config.DefaultConfig("test")
@@ -24,8 +25,14 @@ func TestScanUsesRules(t *testing.T) {
 	if len(FilterByMode(files, rules.ModeBlob)) != 1 {
 		t.Fatalf("blob files = %+v", FilterByMode(files, rules.ModeBlob))
 	}
-	if len(FilterByMode(files, rules.ModeGit)) != 1 {
-		t.Fatalf("git files = %+v", FilterByMode(files, rules.ModeGit))
+	gitFiles := FilterByMode(files, rules.ModeGit)
+	if len(gitFiles) != 1 || gitFiles[0].Path != "Content/Data/table.csv" {
+		t.Fatalf("git files = %+v", gitFiles)
+	}
+	for _, f := range files {
+		if !IsGameDepotManagedPath(f.Path) {
+			t.Fatalf("Scan should only return Content-managed files, got %+v", files)
+		}
 	}
 }
 

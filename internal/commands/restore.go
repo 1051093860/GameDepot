@@ -39,6 +39,9 @@ func Restore(ctx context.Context, start string, targetPath string, sha256 string
 		if entry.Deleted {
 			return fmt.Errorf("path is marked deleted in manifest: %s", targetPath)
 		}
+		if entry.Storage != manifest.StorageBlob {
+			return fmt.Errorf("path is not blob-managed in current manifest: %s (storage=%s)", targetPath, entry.Storage)
+		}
 		if entry.SHA256 == "" {
 			return fmt.Errorf("manifest entry has no sha256: %s", targetPath)
 		}

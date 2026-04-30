@@ -18,10 +18,10 @@ func TestClassifyRel(t *testing.T) {
 		kind string
 	}{
 		{"Content/Maps/Main.umap", rules.ModeBlob, "unreal_map"},
-		{"Config/DefaultGame.ini", rules.ModeGit, "unreal_config"},
-		{"Source/Game/GameMode.cpp", rules.ModeGit, "code"},
+		{"Config/DefaultGame.ini", rules.ModeGit, "git_native"},
+		{"Source/Game/GameMode.cpp", rules.ModeGit, "git_native"},
 		{"Saved/Logs/Game.log", rules.ModeIgnore, "unreal_generated"},
-		{"Random/file.tmp", rules.ModeIgnore, "unmatched"},
+		{"Random/file.tmp", rules.ModeGit, "git_native"},
 	}
 
 	for _, tc := range cases {
@@ -55,7 +55,7 @@ func TestClassifyWalkIncludesMatchedAndSkipsIgnoredDirs(t *testing.T) {
 		t.Fatalf("missing blob classification: %+v", got)
 	}
 	if paths["Config/DefaultGame.ini"] != rules.ModeGit {
-		t.Fatalf("missing git classification: %+v", got)
+		t.Fatalf("missing native git classification: %+v", got)
 	}
 	if _, ok := paths["Saved/Logs/Game.log"]; ok {
 		t.Fatalf("ignored dir should be skipped: %+v", got)

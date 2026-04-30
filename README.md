@@ -1,411 +1,514 @@
-# GameDepot v0.7
+# GameDepot v0.6-cmd-core
 
-GameDepot is a Git + object-store workflow prototype for small UE-style game projects.
+This version intentionally pauses the UE plugin line and returns to a stable command-line-first Core.
+The goal is to validate the core workflow before reintroducing daemon/tasks and UE UI.
 
-v0.7 adds a PySide desktop GUI on top of the v0.6 local HTTP API daemon while keeping all existing CLI, Aliyun OSS, GC, and team smoke-test capabilities. The HTTP API remains local-first: it binds to `127.0.0.1` by default and can optionally require a bearer token.
+## What changed
 
-Main v0.7 additions:
-
-- `gui`: launch the PySide desktop client.
-- `daemon`/`serve`: start a local HTTP API server.
-- `api-smoke-test`: create a simulated UE project and exercise the HTTP API end-to-end.
-- JSON API endpoints for status, classify, manifest, store check, locks, submit, sync, restore, verify, history, GC, and delete-version.
-
-Existing v0.5.x features remain:
-
-- `config add-oss`: convenience profile command for Alibaba Cloud OSS S3-compatible endpoints.
-- `remote-smoke-test`: simulated UE project smoke test against a real store profile such as Aliyun OSS.
-- `team-smoke-test`: two-client Alice/Bob collaboration smoke test using a local bare Git remote plus a shared object store profile.
-- `delete-version`: manually delete a specific historical blob version.
-- `gc`: list and optionally delete unreferenced blob objects.
-- deletion log: executed deletes append JSONL records under `.gamedepot/logs/deletions.jsonl`.
-- `smoke-test` now exercises delete-version and GC flows.
-
-`gc` and `delete-version` are **dry-run by default**. They only delete when you pass `--execute`.
-
-A project repository does not store access keys. It only stores:
-
-```yaml
-store:
-  profile: aliyun-oss
-  prefix: projects/PartyGame/blobs
-```
-
-The real endpoint, bucket, credentials, and lock user name live in the user's global GameDepot config directory.
-
----
+- All Git operations use `git -C <ProjectRoot> ...` instead of relying on the process working directory.
+- Project config now has a managed `git:` section with remote/upstream/branch settings.
+- New `git-config` command for remote/upstream setup.
+- `sync` now supports the team workflow: Git fetch/pull first, then blob sync.
+- `submit` supports `--push` to push Git commits after uploading blobs and committing manifest changes.
+- New `asset-status` command with recoverability states.
+- New `repair-current-blob` command for re-uploading a missing current blob when the local file still matches the manifest SHA.
+- New `gc-impact` command to preview whether GC candidates would break current versions or historical restore.
 
 ## Build
-
-From the parent directory that contains `GameDepot`:
 
 ```powershell
 cd .\GameDepot
 
-go fmt ./...
 go test ./...
 go build -o gamedepot.exe .\cmd\gamedepot
 
 cd ..
 ```
 
----
-
-## Local simulated UE smoke test
-
-This does not require Unreal Engine. It creates fake `.umap`, `.uasset`, `.xlsx`, `.blend`, and `.zip` files and runs the full workflow.
+## Configure Aliyun OSS
 
 ```powershell
-.\GameDepot\gamedepot.exe smoke-test `
-  --workspace .\GameDepot_SmokeWorkspace `
-  --report .\gamedepot_smoke_report.md
+.\GameDepot\gamedepot.exe config add-oss aliyun-oss `
+  --region cn-shenzhen `
+  --bucket "lsq"
+
+.\GameDepot\gamedepot.exe config set-credentials aliyun-oss `
+  --access-key-id <AccessKeyId> `
+  --access-key-secret <AccessKeySecret>
 ```
 
-The smoke test runs:
+## Command-first smoke flow
+
+Assume:
 
 ```text
+.
+├─ GameDepot
+└─ GameTest
+```
+
+```powershell
+Remove-Item -Recurse -Force .\GameTest -ErrorAction SilentlyContinue
+mkdir .\GameTest
+cd .\GameTest
+
 git init
-init --template ue5
-config user
-doctor
-store check
-classify/status
-lock/locks
-submit/verify
-restore dirty protection
-second submit
-history
-delete-version dry-run/execute
-gc dry-run, including protected tag check
-sync/unlock/final verify
+git config user.email "test@example.com"
+git config user.name "GameDepot Test"
+
+..\GameDepot\gamedepot.exe init --project GameTest --template ue5
+..\GameDepot\gamedepot.exe config project-use aliyun-oss
+..\GameDepot\gamedepot.exe doctor
+..\GameDepot\gamedepot.exe store check
 ```
 
----
-
-## Local HTTP API daemon
-
-Start the daemon from inside a GameDepot project:
+Create fake UE-style files:
 
 ```powershell
-..\GameDepot\gamedepot.exe daemon --addr 127.0.0.1:17320 --root .
+New-Item -ItemType Directory -Force Content\Maps | Out-Null
+New-Item -ItemType Directory -Force Content\Characters | Out-Null
+New-Item -ItemType Directory -Force Config | Out-Null
+
+"fake map binary v1" | Out-File -Encoding utf8 Content\Maps\Main.umap
+"fake hero asset v1" | Out-File -Encoding utf8 Content\Characters\Hero.uasset
+"[/Script/EngineSettings.GameMapsSettings]" | Out-File -Encoding utf8 Config\DefaultGame.ini
 ```
 
-With token auth:
+Submit and verify:
 
 ```powershell
-..\GameDepot\gamedepot.exe daemon --addr 127.0.0.1:17320 --root . --token dev-token
+..\GameDepot\gamedepot.exe classify --all
+..\GameDepot\gamedepot.exe submit -m "initial fake UE project"
+..\GameDepot\gamedepot.exe verify --remote-only
 ```
 
-Example API calls:
+Check recoverability:
 
 ```powershell
-Invoke-RestMethod http://127.0.0.1:17320/api/v1/health
-Invoke-RestMethod http://127.0.0.1:17320/api/v1/status
-Invoke-RestMethod -Method Post http://127.0.0.1:17320/api/v1/verify -Body "{}" -ContentType "application/json"
+..\GameDepot\gamedepot.exe asset-status Content\Maps\Main.umap
+..\GameDepot\gamedepot.exe asset-status Content\Characters\Hero.uasset
+..\GameDepot\gamedepot.exe asset-status --json
 ```
 
-With token auth:
+Restore:
 
 ```powershell
-$headers = @{ Authorization = "Bearer dev-token" }
-Invoke-RestMethod -Headers $headers http://127.0.0.1:17320/api/v1/health
+Remove-Item Content\Maps\Main.umap
+..\GameDepot\gamedepot.exe restore Content\Maps\Main.umap
+Get-Content Content\Maps\Main.umap
 ```
 
-Important endpoints:
+
+Second version:
+
+```powershell
+"fake hero asset v2" | Out-File -Encoding utf8 Content\Characters\Hero.uasset
+..\GameDepot\gamedepot.exe submit -m "update hero asset"
+..\GameDepot\gamedepot.exe history Content\Characters\Hero.uasset
+..\GameDepot\gamedepot.exe asset-status Content\Characters\Hero.uasset
+```
+
+GC preview:
+
+```powershell
+..\GameDepot\gamedepot.exe gc --dry-run
+..\GameDepot\gamedepot.exe gc-impact --dry-run
+```
+
+## Git remote / upstream
+
+Set the team remote:
+
+```powershell
+..\GameDepot\gamedepot.exe git-config set-remote `
+  --name origin `
+  --url <your-git-repo-url>
+```
+
+Optional upstream:
+
+```powershell
+..\GameDepot\gamedepot.exe git-config set-upstream `
+  --name upstream `
+  --url <your-upstream-url>
+```
+
+Show and test:
+
+```powershell
+..\GameDepot\gamedepot.exe git-config show
+..\GameDepot\gamedepot.exe git-config test
+```
+
+Submit and push:
+
+```powershell
+..\GameDepot\gamedepot.exe submit -m "update assets" --push
+```
+
+Sync with Git pull + blob download:
+
+```powershell
+..\GameDepot\gamedepot.exe sync --force
+```
+
+Blob-only sync:
+
+```powershell
+..\GameDepot\gamedepot.exe sync --force --no-pull
+```
+
+## Recoverability states
+
+`asset-status` reports:
+
+- `restorable`: current version exists in store and can be restored.
+- `local_only`: local file exists but is not uploaded/currently differs from manifest.
+- `current_blob_missing`: current manifest SHA is missing from store; can be repaired if local file matches manifest SHA.
+- `history_broken`: current version is restorable, but at least one historical blob is missing.
+- `lost`: local file is missing and current remote blob is missing.
+
+## Repair current blob
+
+If `asset-status` says `current_blob_missing` and the local file still matches the manifest SHA:
+
+```powershell
+..\GameDepot\gamedepot.exe repair-current-blob Content\Characters\Hero.uasset
+```
+
+## Next step
+
+After this command-line Core is stable, the next layer should be a daemon/task API that wraps the same core operations. UE should only call the daemon and should not duplicate Git/OSS logic.
+
+## v0.6.1 cmd-smoke-test
+
+`cmd-smoke-test` is the full command-line regression test for the cmd-first core workflow. It does not require Unreal Engine or Aliyun OSS. It creates an isolated global config directory, a shared local blob store, a bare Git `origin`, a bare Git `upstream`, a simulated UE project, and a peer clone.
+
+It covers:
+
+- `git-config set-remote`, `set-upstream`, `show`, `test`
+- shared local store profile
+- UE5 rule classification
+- `submit --push`
+- `sync --force` with Git pull + blob restore
+- `sync --force --no-pull`
+- peer clone restore from blob store
+- `asset-status`, including recursive JSON output
+- restore dirty-file protection and `--force`
+- current blob deletion + `repair-current-blob`
+- `gc --dry-run`
+- `gc-impact --dry-run`, JSON, and `--protect-all-tags`
+
+Run:
+
+```powershell
+.\GameDepot\gamedepot.exe cmd-smoke-test `
+  --workspace .\GameDepot_CmdCoreSmokeWorkspace `
+  --report .\gamedepot_cmd_core_smoke_report.md
+```
+
+Expected terminal result:
 
 ```text
-GET  /api/v1/health
-GET  /api/v1/version
-GET  /api/v1/status
-GET  /api/v1/classify?all=true&target=Content
-GET  /api/v1/manifest
-GET  /api/v1/locks
-GET  /api/v1/history?path=Content/Characters/Hero.uasset
-GET  /api/v1/store
-POST /api/v1/store/check
-POST /api/v1/submit          { "message": "..." }
-POST /api/v1/sync            { "force": true }
-POST /api/v1/restore         { "path": "Content/Maps/Main.umap", "force": true }
-POST /api/v1/lock            { "path": "Content/Maps/Main.umap", "note": "editing" }
-POST /api/v1/unlock          { "path": "Content/Maps/Main.umap" }
-POST /api/v1/verify          { "remote_only": true }
-POST /api/v1/gc              { "dry_run": true, "json": true }
-POST /api/v1/delete-version  { "path": "...", "sha256": "...", "dry_run": true }
-```
-
-### API smoke test
-
-This does not require Unreal Engine. It starts the API handler in-process, creates a simulated UE project, and exercises the HTTP endpoints.
-
-```powershell
-.\GameDepot\gamedepot.exe api-smoke-test `
-  --workspace .\GameDepot_APISmokeWorkspace `
-  --report .\gamedepot_api_smoke_report.md
+Cmd core smoke test result: PASS
 ```
 
 Open the report:
 
 ```powershell
-notepad .\gamedepot_api_smoke_report.md
+notepad .\gamedepot_cmd_core_smoke_report.md
 ```
 
----
+# v0.7 UE-specific API layer
 
-## Aliyun OSS setup
-
-Create an OSS bucket in the Aliyun console first. Use a RAM AccessKey with permission to put, get, list, and delete objects in that bucket or project prefix.
-
-Add an OSS profile. Both argument orders are supported in v0.5.1:
-
-```powershell
-.\GameDepot\gamedepot.exe config add-oss aliyun-oss `
-  --region cn-hangzhou `
-  --bucket your-bucket-name
-```
-
-```powershell
-.\GameDepot\gamedepot.exe config add-oss `
-  --region cn-hangzhou `
-  --bucket your-bucket-name `
-  aliyun-oss
-```
-
-This creates an S3-compatible OSS profile with:
+This version keeps UE plugin work paused and exposes a UE-first daemon API under:
 
 ```text
-endpoint: https://s3.oss-cn-hangzhou.aliyuncs.com
-force_path_style: false
+/api/ue/v1/...
 ```
 
-Set credentials. Both argument orders are supported:
+The daemon wraps the already-tested cmd-core operations. UE should treat the daemon as the single backend and should not call Git, OSS, manifest, or CLI subcommands directly.
 
-```powershell
-.\GameDepot\gamedepot.exe config set-credentials aliyun-oss `
-  --access-key-id YOUR_ACCESS_KEY_ID `
-  --access-key-secret YOUR_ACCESS_KEY_SECRET
-```
-
-```powershell
-.\GameDepot\gamedepot.exe config set-credentials `
-  --access-key-id YOUR_ACCESS_KEY_ID `
-  --access-key-secret YOUR_ACCESS_KEY_SECRET `
-  aliyun-oss
-```
-
-Check profiles:
-
-```powershell
-.\GameDepot\gamedepot.exe config profiles
-```
-
----
-
-## Aliyun OSS remote smoke test
-
-This uses your real global profile and credentials. It does **not** isolate `GAMEDEPOT_CONFIG_DIR`.
-
-```powershell
-.\GameDepot\gamedepot.exe remote-smoke-test `
-  --profile aliyun-oss `
-  --workspace .\GameDepot_OSS_SmokeWorkspace `
-  --report .\gamedepot_oss_smoke_report.md `
-  --project SimUEProjectOSS
-```
-
-The remote smoke test creates a simulated UE-style project, switches it to the `aliyun-oss` profile, uploads blobs to OSS, verifies remote blobs, restores files from OSS, tests locks, runs `delete-version`, runs `gc --dry-run`, and writes a markdown report.
-
-Because the project name becomes part of the store prefix, use a unique `--project` value when repeating remote tests if you want separate prefixes.
-
----
-
-## Aliyun OSS team smoke test
-
-This is the most important collaboration test. It creates Alice and Bob workspaces, a local bare Git remote, and uses your real OSS profile as the shared blob/lock store.
-
-```powershell
-.\GameDepot\gamedepot.exe team-smoke-test `
-  --profile aliyun-oss `
-  --workspace .\GameDepot_TeamSmokeWorkspace `
-  --report .\gamedepot_team_smoke_report.md
-```
-
-It verifies: Alice submit -> Bob clone and sync, lock conflict, Alice edits map -> Bob pulls and syncs, Bob edits asset -> Alice pulls and syncs, remote-only verify, and GC dry-run with tag protection.
-
----
-
-## Manual OSS project test
-
-Inside an existing GameDepot project:
-
-```powershell
-..\GameDepot\gamedepot.exe config project-use aliyun-oss
-..\GameDepot\gamedepot.exe store info
-..\GameDepot\gamedepot.exe store check
-..\GameDepot\gamedepot.exe submit -m "test aliyun oss"
-..\GameDepot\gamedepot.exe verify --remote-only
-```
-
----
-
-## GC and delete-version
-
-Show candidates only:
-
-```powershell
-..\GameDepot\gamedepot.exe gc --dry-run
-```
-
-Protect a milestone tag while scanning:
-
-```powershell
-..\GameDepot\gamedepot.exe gc --dry-run --protect-tag milestone-v0.1
-```
-
-Protect all Git tags:
-
-```powershell
-..\GameDepot\gamedepot.exe gc --dry-run --protect-all-tags
-```
-
-Actually delete GC candidates:
-
-```powershell
-..\GameDepot\gamedepot.exe gc --execute
-```
-
-Delete one historical blob version:
-
-```powershell
-..\GameDepot\gamedepot.exe delete-version Content\Characters\Hero.uasset `
-  --sha256 FULL_64_CHAR_SHA256 `
-  --execute
-```
-
-Deleting the current manifest version is refused unless you pass `--force-current`.
-
-Executed deletions are logged to:
-
-```text
-.gamedepot/logs/deletions.jsonl
-```
-
----
-
-## MinIO test
-
-Start MinIO:
-
-```powershell
-docker run -p 9000:9000 -p 9001:9001 `
-  -e "MINIO_ROOT_USER=minioadmin" `
-  -e "MINIO_ROOT_PASSWORD=minioadmin" `
-  quay.io/minio/minio server /data --console-address ":9001"
-```
-
-Create bucket `gamedepot-test` in the MinIO console, then:
-
-```powershell
-.\GameDepot\gamedepot.exe config add-s3 minio-local `
-  --endpoint http://127.0.0.1:9000 `
-  --region us-east-1 `
-  --bucket gamedepot-test `
-  --force-path-style
-
-.\GameDepot\gamedepot.exe config set-credentials minio-local `
-  --access-key-id minioadmin `
-  --access-key-secret minioadmin
-
-.\GameDepot\gamedepot.exe remote-smoke-test `
-  --profile minio-local `
-  --workspace .\GameDepot_MinIO_SmokeWorkspace `
-  --report .\gamedepot_minio_smoke_report.md
-```
-
----
-
-## Main commands
-
-```text
-gamedepot init --project my-game [--template ue5]
-gamedepot doctor
-gamedepot config path
-gamedepot config user [--name <name>] [--email <email>]
-gamedepot config profiles
-gamedepot config add-local <name> [--path <path>]
-gamedepot config add-oss <name> --region <region> --bucket <bucket> [--internal]
-gamedepot config add-s3 <name> --endpoint <url> --bucket <bucket> [--region <region>] [--force-path-style]
-gamedepot config set-credentials <profile> [--access-key-id <id>] [--access-key-secret <secret>]
-gamedepot config use <profile>
-gamedepot config project-use <profile>
-gamedepot smoke-test [--workspace <dir>] [--report <file>]
-gamedepot remote-smoke-test --profile <profile> [--workspace <dir>] [--report <file>]
-gamedepot team-smoke-test --profile <profile> [--workspace <dir>] [--report <file>]
-gamedepot daemon [--addr 127.0.0.1:17320] [--root .] [--token <token>]
-gamedepot gui [--root .] [--addr 127.0.0.1:17320] [--token <token>]
-gamedepot api-smoke-test [--workspace <dir>] [--report <file>] [--profile <profile>]
-gamedepot store info
-gamedepot store check
-gamedepot classify [path] [--json] [--all]
-gamedepot status [--json]
-gamedepot submit -m "update assets"
-gamedepot sync [--force]
-gamedepot verify [--local-only] [--remote-only]
-gamedepot ls [--all]
-gamedepot history <path>
-gamedepot restore <path> [--sha256 <sha256>] [--force]
-gamedepot lock <path> [--note <text>] [--force]
-gamedepot unlock <path> [--force]
-gamedepot locks [--json]
-gamedepot delete-version <path> --sha256 <sha256> [--dry-run|--execute] [--force-current]
-gamedepot gc [--dry-run|--execute] [--protect-tag <tag>] [--protect-all-tags] [--json]
-```
-
----
-
-## PySide GUI
-
-v0.7 includes a lightweight desktop client under `gui/`. It talks to the local HTTP API daemon instead of reimplementing Git, OSS, manifest, lock, or GC logic.
-
-Install the GUI dependency:
+## Build
 
 ```powershell
 cd .\GameDepot
-python -m pip install -r .\gui\requirements.txt
+go build -o gamedepot.exe .\cmd\gamedepot
+cd ..
 ```
 
-Launch from the GameDepot repository root:
+## Start daemon with automatic port
+
+Run this inside or against an initialized GameDepot project:
 
 ```powershell
-.\gamedepot.exe gui --root ..\GameTest
+.\GameDepot\gamedepot.exe daemon --root .\GameTest --addr 127.0.0.1:0
 ```
 
-Or launch the Python entry directly:
+The daemon writes runtime connection info to:
+
+```text
+<GameProject>/.gamedepot/runtime/daemon.json
+```
+
+## UE API smoke test
 
 ```powershell
-python .\gui\run_gui.py `
-  --gamedepot-exe .\gamedepot.exe `
-  --project-root ..\GameTest `
-  --addr 127.0.0.1:17320
+.\GameDepot\gamedepot.exe ue-api-smoke-test `
+  --workspace .\GameDepot_UEAPISmokeWorkspace `
+  --report .\gamedepot_ue_api_smoke_report.md
 ```
 
-The GUI can start and stop the daemon for the selected project root. Current tabs:
+The smoke test automatically creates:
 
 ```text
-Dashboard: health, status, store info/check, verify, sync
-Files: classify, restore
-Locks: locks, lock, unlock
-Submit: submit, git status
-GC: gc dry-run/execute switch, delete-version dry-run/execute switch
+GameDepot_UEAPISmokeWorkspace/
+  _global_config/
+  _shared_blobs/
+  _git_remote/<project>.git
+  SimUEAPIProject/
 ```
 
-Recommended GUI workflow:
+It validates:
 
 ```text
-1. Select gamedepot.exe
-2. Select the GameDepot project root
-3. Click Start daemon
-4. Click Health / Status
-5. Use Classify, Lock, Submit, Sync, Restore, Verify, and GC from the tabs
+GET  /api/ue/v1/health
+GET  /api/ue/v1/overview
+GET  /api/ue/v1/settings
+POST /api/ue/v1/git/test
+POST /api/ue/v1/store/test
+POST /api/ue/v1/assets/status
+POST /api/ue/v1/assets/history
+POST /api/ue/v1/project/gc-preview
+POST /api/ue/v1/project/verify task
+POST /api/ue/v1/project/sync task
+POST /api/ue/v1/project/submit task
+POST /api/ue/v1/assets/restore task
+POST /api/ue/v1/assets/repair-current-blob
+POST /api/ue/v1/admin/shutdown
 ```
 
-The GUI is intentionally thin. If a button fails, the log panel shows the API error returned by Core.
+## Key API groups
+
+```text
+Lifecycle
+  GET  /api/ue/v1/health
+  GET  /api/ue/v1/overview
+  POST /api/ue/v1/admin/shutdown
+
+Settings
+  GET  /api/ue/v1/settings
+  POST /api/ue/v1/settings
+  GET  /api/ue/v1/rules
+  POST /api/ue/v1/rules/upsert
+  POST /api/ue/v1/git/test
+  POST /api/ue/v1/store/test
+
+Tasks
+  POST /api/ue/v1/tasks
+  GET  /api/ue/v1/tasks
+  GET  /api/ue/v1/tasks/{task_id}
+  POST /api/ue/v1/tasks/{task_id}/cancel
+
+Project
+  POST /api/ue/v1/project/sync
+  POST /api/ue/v1/project/submit
+  POST /api/ue/v1/project/verify
+  POST /api/ue/v1/project/gc-preview
+
+Assets
+  POST /api/ue/v1/assets/status
+      POST /api/ue/v1/assets/restore
+  POST /api/ue/v1/assets/repair-current-blob
+  POST /api/ue/v1/assets/history
+  POST /api/ue/v1/assets/submit
+
+Map
+  POST /api/ue/v1/map/status
+```
+
+## v0.8 UE API Plugin
+
+This version keeps the v0.7 UE-specific daemon API and adds a fresh Unreal Editor plugin client.
+
+Design rules:
+
+- Unreal talks only to `/api/ue/v1/*`.
+- Full daemon request/response JSON is written to `Saved/Logs/GameDepotUE_API.log` by the plugin.
+- Daemon-side API JSONL is written to `.gamedepot/logs/ue-api.jsonl`.
+- UE popups are intentionally friendly; detailed errors go to Output Log and the JSON log files.
+
+Build both CLI and hidden daemon executable on Windows:
+
+```powershell
+go build -o gamedepot.exe .\cmd\gamedepot
+go build -ldflags="-H windowsgui" -o gamedepotd.exe .\cmd\gamedepot
+```
+
+Install the plugin into a UE project:
+
+```powershell
+.\GameDepot\gamedepot.exe ue-plugin install --project .\UEProject --overwrite
+.\GameDepot\gamedepot.exe ue-plugin verify --project .\UEProject
+.\GameDepot\gamedepot.exe ue-plugin diagnose --project .\UEProject
+.\GameDepot\gamedepot.exe ue-plugin write-ubt-config --project .\UEProject --low-memory
+.\GameDepot\gamedepot.exe ue-plugin verify --project .\UEProject
+```
+
+The plugin adds a small GameDepot toolbar and a Content Browser context menu. It auto-starts `gamedepotd.exe daemon --root <ProjectRoot> --addr 127.0.0.1:0`, reads `.gamedepot/runtime/daemon.json`, and calls the UE API.
+
+## v0.10 Strategy B: Content-only GameDepot rules
+
+GameDepot now owns only `Content/**`. Binary assets under `Content` are routed to the blob store and written into `depot/manifests/main.gdmanifest.json`; small text/data files under `Content` can still be routed to Git by rule. Everything outside `Content` — `Plugins/**`, `Source/**`, `Config/**`, `Docs/**`, `.uproject`, and normal project files — is staged directly by Git during `submit` and is not written into the GameDepot manifest.
+
+Unknown files under `Content/**` are still treated as `review`, and `submit` fails until a Content rule is added or `--allow-unmanaged` is used. Unknown files outside `Content/**` are native Git files, not GameDepot review blockers.
+
+Rule priority inside `Content/**` is:
+
+```text
+protected runtime ignores > manual Content rules > built-in UE5 Content rules > review
+```
+
+Useful commands:
+
+```powershell
+# Show all rules
+.\gamedepot.exe rules list
+
+# Force one selected path into OSS/blob storage
+.\gamedepot.exe rules set --mode blob --kind manual_blob Content\Weird\Foo.custom
+
+# Force one path into Git
+.\gamedepot.exe rules set --mode git --kind manual_git Content\Data\SmallTable.json
+
+# Ignore one path
+.\gamedepot.exe rules set --mode ignore --kind manual_ignore Content\Temp\Scratch.uasset
+
+# Apply to a Content directory
+.\gamedepot.exe rules set --mode blob --scope directory Content\Imported\VendorPack
+
+# Apply to an extension within the Content tree
+.\gamedepot.exe rules set --mode blob --scope extension Content\Imported\sample.abc
+```
+
+Emergency bypass:
+
+```powershell
+.\gamedepot.exe submit -m "submit known files only" --allow-unmanaged
+```
+
+The Unreal Content Browser context menu also has:
+
+- `Set Rule: Blob / OSS`
+- `Set Rule: Git`
+- `Set Rule: Ignore`
+
+These add exact-path manual rules to `.gamedepot/config.yaml`, before the default UE rules. Use `Blob / OSS` for normal `.uasset` and `.umap` files; use `Git` only for small text-like data files.
+
+## Git / OSS routing model in v0.8
+
+GameDepot v0.8 treats Git as the version authority and stores the manifest in Git. The manifest is now a per-version storage routing table: for each managed file it records whether that version stores the file body in Git or in the blob store.
+
+A single path may move in either direction across commits:
+
+```text
+commit A: Content/Hero.uasset -> storage=git
+commit B: Content/Hero.uasset -> storage=blob sha256=...
+commit C: Content/Hero.uasset -> storage=git
+```
+
+The invariant is that one commit has only one authoritative source for a path:
+
+- `storage=git`: the file body is tracked by Git.
+- `storage=blob`: the file body is stored in OSS/S3/local blob store and Git tracks only the manifest reference.
+- `deleted=true`: the path was managed before but is deleted in this manifest version.
+
+`rules` decide how the next submit should classify files. The checked-out `manifest` decides how the current version should be restored.
+
+### Submit transitions
+
+`gamedepot submit` now compares the previous manifest with the current rules and performs precise Git index changes:
+
+| Previous manifest | Current rule | Submit behavior |
+|---|---|---|
+| git | git | `git add -f <path>`, manifest keeps `storage=git` |
+| git | blob | upload file to blob store, manifest writes `storage=blob`, `git rm --cached <path>` |
+| blob | blob | upload new content if hash changed, manifest updates `sha256` |
+| blob | git | ensure local file exists, `git add -f <path>`, manifest writes `storage=git` |
+| none | git | `git add -f <path>`, manifest writes `storage=git` |
+| none | blob | upload file, manifest writes `storage=blob` |
+| any | review | submit fails unless `--allow-unmanaged` is used |
+
+### Checkout and sync
+
+Use GameDepot checkout when moving between versions with different Git/blob ownership:
+
+```powershell
+gamedepot checkout <git-ref>
+```
+
+It removes known current blob-managed local files when safe, runs `git checkout`, reloads the checked-out config/manifest, then restores all `storage=blob` files from the blob store.
+
+If you already ran raw Git commands, use:
+
+```powershell
+gamedepot sync
+```
+
+`sync` reads the currently checked-out manifest and restores only `storage=blob` entries. `storage=git` entries are left to Git.
+
+### GC rule
+
+Blob garbage collection must preserve every blob referenced by protected Git manifest versions, not just the current worktree. v0.8 GC counts only manifest entries with `storage=blob`.
+
+## Content Browser Git / OSS status columns
+
+The Unreal plugin now adds **Tools > GameDepot > Asset Status Browser** and a toolbar button named **Asset Status**.
+
+This opens a GameDepot-specific Content Browser asset picker in Columns view. It adds these columns:
+
+- `GD Storage`: current manifest route for this Git version: `Git`, `OSS`, `New`, or unknown.
+- `GD Sync`: local working-tree state compared with the current manifest route, such as `Synced`, `Modified`, `Missing Local`, `OSS/Git Conflict`, or `New / Unsubmitted`.
+- `GD Remote`: for OSS/blob-managed assets, whether the current blob exists in the configured store.
+- `GD Rule`: the rule mode that will be used by the next submit.
+- `GD Message`: diagnostic text explaining the current state.
+
+Use **Refresh GameDepot Status** in the tab, or **Tools > GameDepot > Refresh Asset Status Cache**, after changing assets, syncing, submitting, or changing rules.
+
+The regular UE Content Browser context menu is still available for selected assets. The status browser is a separate Content Browser view because Unreal's normal asset-browser status overlay is tied to the editor source-control provider; GameDepot keeps its Git/OSS routing model in the daemon and manifest instead of replacing UE's built-in provider.
+
+## v0.8 status browser hotfix
+
+This build fixes two Unreal Editor integration issues:
+
+- The UE plugin now rejects stale daemon runtimes whose version does not match the plugin build. If an older daemon is found, the plugin runs `gamedepot daemon stop --root <project> --kill`, switches the next launch to an auto port, and starts the bundled daemon again. This prevents `/api/ue/v1/rules/upsert` from returning 404 because UE is still connected to an old daemon.
+- The Asset Status Browser now includes a guaranteed visible status table above the asset picker, in addition to the Content Browser column-view custom columns. The asset picker settings name was reset to `GameDepotAssetStatusBrowser_v2` so old column layout state will not hide the GameDepot columns.
+
+Manual stale-daemon cleanup:
+
+```powershell
+gamedepot daemon stop --root "C:\Path\To\UEProject" --kill
+```
+
+Then reopen UE or click any GameDepot action to auto-start the new daemon.
+
+## v0.8 API smoke test
+
+After the v0.8 Git/OSS routing core is built, run the daemon/API smoke before wiring the UE plugin to the real daemon:
+
+```powershell
+go build -o gamedepot.exe .\cmd\gamedepot
+.\gamedepot.exe v08-core-smoke-test
+.\gamedepot.exe v08-api-smoke-test
+```
+
+`v08-api-smoke-test` creates an isolated fake UE project, starts the daemon on an automatic local port, and verifies the HTTP contract used by the UE UI:
+
+- rules list/upsert/delete/reorder
+- asset status for new, review, Git-routed, and OSS-routed files
+- submit task failure on review files
+- Git -> OSS and OSS -> Git submit transitions
+- mixed Git/OSS history listing
+- restore from Git history and OSS history
+- revert unsubmitted changes
+- lightweight overview and sync task

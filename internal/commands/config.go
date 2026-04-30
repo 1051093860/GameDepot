@@ -5,6 +5,8 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -27,9 +29,15 @@ func ConfigPath(ctx context.Context, start string) error {
 	fmt.Println("global credentials: " + cred)
 
 	if root, err := config.FindRoot(start); err == nil {
+		fmt.Println("project root:       " + root)
 		fmt.Println("project config:     " + root + string(os.PathSeparator) + config.ConfigRelPath)
+	} else if candidate, candErr := config.FindProjectRootCandidate(start); candErr == nil {
+		fmt.Println("project root:       " + candidate.Root + " (detected by " + candidate.Marker + ")")
+		fmt.Println("project config:     " + candidate.Root + string(os.PathSeparator) + config.ConfigRelPath + " (missing)")
+		fmt.Println("project status:     not initialized; run `gamedepot init .` here")
 	} else {
-		fmt.Println("project config:     <not inside a GameDepot project>")
+		fmt.Println("project root:       <not inside a GameDepot or Unreal project>")
+		fmt.Println("project config:     <not found>")
 	}
 
 	return nil
@@ -43,6 +51,13 @@ func ConfigProfiles(ctx context.Context) error {
 		return err
 	}
 
+	projectRoot := ""
+	if root, err := config.FindRoot("."); err == nil {
+		projectRoot = root
+	} else if candidate, candErr := config.FindProjectRootCandidate("."); candErr == nil {
+		projectRoot = candidate.Root
+	}
+
 	names := make([]string, 0, len(cfg.Profiles))
 	for name := range cfg.Profiles {
 		names = append(names, name)
@@ -50,6 +65,9 @@ func ConfigProfiles(ctx context.Context) error {
 	sort.Strings(names)
 
 	fmt.Println("default profile:", cfg.DefaultProfile)
+	if projectRoot != "" {
+		fmt.Println("project root:   ", projectRoot)
+	}
 	fmt.Println("profiles:")
 	for _, name := range names {
 		p := cfg.Profiles[name]
@@ -59,7 +77,11 @@ func ConfigProfiles(ctx context.Context) error {
 		}
 		switch p.Type {
 		case "local":
-			fmt.Printf("%s %-16s %-8s %s\n", mark, name, p.Type, p.Path)
+			path := p.Path
+			if projectRoot != "" && !filepath.IsAbs(path) {
+				path = path + " -> " + filepath.Join(projectRoot, filepath.FromSlash(path))
+			}
+			fmt.Printf("%s %-16s %-8s %s\n", mark, name, p.Type, path)
 		case "s3":
 			style := ""
 			if p.ForcePathStyle {
@@ -299,32 +321,96 @@ func readCredentialsInteractively(existingID string, existingSecret string) (str
 	return id, secret, nil
 }
 
-func ConfigUser(ctx context.Context, name string, email string) error {
+func ConfigUser(ctx context.Context, name string, email string, identity string) error {
 	_ = ctx
 
-	cfg, err := config.LoadGlobalConfig()
+	global, err := config.LoadGlobalConfig()
 	if err != nil {
 		return err
 	}
 
-	changed := false
+	globalChanged := false
 	if strings.TrimSpace(name) != "" {
-		cfg.User.Name = strings.TrimSpace(name)
-		changed = true
+		global.User.Name = strings.TrimSpace(name)
+		globalChanged = true
 	}
 	if strings.TrimSpace(email) != "" {
-		cfg.User.Email = strings.TrimSpace(email)
-		changed = true
+		global.User.Email = strings.TrimSpace(email)
+		globalChanged = true
 	}
 
-	if changed {
-		if err := config.SaveGlobalConfig(cfg); err != nil {
+	if globalChanged {
+		if err := config.SaveGlobalConfig(global); err != nil {
 			return err
 		}
 		fmt.Println("Saved global user config")
 	}
 
-	fmt.Printf("name: %s\n", cfg.User.Name)
-	fmt.Printf("email: %s\n", cfg.User.Email)
+	projectRoot := ""
+	if root, err := config.FindRoot("."); err == nil {
+		projectRoot = root
+	} else if strings.TrimSpace(identity) != "" {
+		return fmt.Errorf("project user identity is no longer used")
+	}
+
+	gitLocalName := gitConfigValue("user.name", true)
+	gitLocalEmail := gitConfigValue("user.email", true)
+	gitGlobalName := gitConfigValue("user.name", false)
+	gitGlobalEmail := gitConfigValue("user.email", false)
+
+	effectiveName, nameSource := firstNonEmptyWithSource(
+		global.User.Name, "global GameDepot",
+		gitLocalName, "local Git",
+		gitGlobalName, "global Git",
+	)
+	effectiveEmail, emailSource := firstNonEmptyWithSource(
+		global.User.Email, "global GameDepot",
+		gitLocalEmail, "local Git",
+		gitGlobalEmail, "global Git",
+	)
+
+	if projectRoot != "" {
+		fmt.Printf("project root:      %s\n", projectRoot)
+	}
+	fmt.Printf("name:              %s\n", effectiveName)
+	fmt.Printf("email:             %s\n", effectiveEmail)
+	fmt.Printf("name source:       %s\n", emptyLabel(nameSource))
+	fmt.Printf("email source:      %s\n", emptyLabel(emailSource))
+	fmt.Printf("global name:       %s\n", global.User.Name)
+	fmt.Printf("global email:      %s\n", global.User.Email)
+	fmt.Printf("git local name:    %s\n", gitLocalName)
+	fmt.Printf("git local email:   %s\n", gitLocalEmail)
+	fmt.Printf("git global name:   %s\n", gitGlobalName)
+	fmt.Printf("git global email:  %s\n", gitGlobalEmail)
 	return nil
+}
+
+func gitConfigValue(key string, local bool) string {
+	args := []string{"config"}
+	if !local {
+		args = append(args, "--global")
+	}
+	args = append(args, "--get", key)
+	out, err := exec.Command("git", args...).Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+func firstNonEmptyWithSource(valuesAndSources ...string) (string, string) {
+	for i := 0; i+1 < len(valuesAndSources); i += 2 {
+		value := strings.TrimSpace(valuesAndSources[i])
+		if value != "" {
+			return value, valuesAndSources[i+1]
+		}
+	}
+	return "", ""
+}
+
+func emptyLabel(s string) string {
+	if strings.TrimSpace(s) == "" {
+		return "<unset>"
+	}
+	return s
 }

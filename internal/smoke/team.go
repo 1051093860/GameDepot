@@ -127,7 +127,7 @@ func (r *teamRunner) run(ctx context.Context) error {
 			return err
 		}
 	}
-	r.report = TeamReport{Version: "v0.6-team-smoke", StartedAt: r.started.UTC().Format(time.RFC3339), Workspace: r.workspace, GitRemote: r.gitRemote, AliceRoot: r.aliceRoot, BobRoot: r.bobRoot, ReportPath: r.reportPath, Executable: r.exe, StoreProfile: r.opts.StoreProfile, Hashes: map[string]string{}, Steps: []Result{}}
+	r.report = TeamReport{Version: "v0.5.2-team-smoke", StartedAt: r.started.UTC().Format(time.RFC3339), Workspace: r.workspace, GitRemote: r.gitRemote, AliceRoot: r.aliceRoot, BobRoot: r.bobRoot, ReportPath: r.reportPath, Executable: r.exe, StoreProfile: r.opts.StoreProfile, Hashes: map[string]string{}, Steps: []Result{}}
 
 	r.section("prepare shared git remote and Alice workspace")
 	r.stepCommand(ctx, "git version", r.workspace, false, "git", "--version")

@@ -9,7 +9,11 @@ type Diff struct {
 	Unchanged []workspace.FileInfo
 }
 
+// Compare is kept as a blob-manifest diff helper. In manifest v2 the manifest can
+// contain git and blob entries, so this function intentionally compares only
+// blob-managed entries. Full submit transitions are handled by commands.Submit.
 func Compare(m Manifest, files []workspace.FileInfo) Diff {
+	m.Normalize()
 	current := map[string]workspace.FileInfo{}
 
 	for _, f := range files {
@@ -21,7 +25,7 @@ func Compare(m Manifest, files []workspace.FileInfo) Diff {
 	for _, f := range files {
 		old, ok := m.Entries[f.Path]
 
-		if !ok || old.Deleted {
+		if !ok || old.Deleted || old.Storage != StorageBlob {
 			d.Added = append(d.Added, f)
 			continue
 		}
@@ -35,7 +39,7 @@ func Compare(m Manifest, files []workspace.FileInfo) Diff {
 	}
 
 	for path, old := range m.Entries {
-		if old.Deleted {
+		if old.Deleted || old.Storage != StorageBlob {
 			continue
 		}
 

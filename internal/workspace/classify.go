@@ -25,6 +25,17 @@ func ClassifyRel(rel string, cfg config.Config) (Classification, error) {
 	}
 
 	fc := rules.FileClassFor(clean, cfg.Rules)
+	// Strategy B for UE projects: GameDepot only classifies Content/** assets.
+	// Any non-Content path that is not explicitly ignored by a protected rule is
+	// handled directly by Git and must not become a GameDepot review blocker.
+	if fc.Mode == rules.ModeReview && !IsGameDepotManagedPath(clean) {
+		return Classification{
+			Path:    clean,
+			Mode:    rules.ModeGit,
+			Kind:    "git_native",
+			Matched: false,
+		}, nil
+	}
 	return Classification{
 		Path:        fc.Path,
 		Mode:        fc.Mode,

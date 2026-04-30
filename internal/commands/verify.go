@@ -48,6 +48,9 @@ func VerifyWithOptions(ctx context.Context, start string, opts VerifyOptions) er
 	problems := 0
 
 	for rel, e := range m.Entries {
+		if !workspace.IsGameDepotManagedPath(rel) {
+			continue
+		}
 		if _, err := workspace.CleanRelPath(rel); err != nil {
 			fmt.Printf("[error] unsafe manifest path: %q: %v\n", rel, err)
 			problems++
@@ -62,17 +65,43 @@ func VerifyWithOptions(ctx context.Context, start string, opts VerifyOptions) er
 		if err != nil {
 			fmt.Printf("[error] cannot classify manifest path: %s: %v\n", rel, err)
 			problems++
-		} else if class.Mode != rules.ModeBlob {
-			fmt.Printf("[error] manifest entry is no longer blob-managed by rules: %s mode=%s rule=%s\n", rel, class.Mode, class.RulePattern)
-			problems++
+		} else if !e.Deleted && class.Mode != rules.ModeReview && string(class.Mode) != string(e.Storage) {
+			fmt.Printf("[warning] current rules want %s but manifest version stores %s: %s rule=%s\n", class.Mode, e.Storage, rel, class.RulePattern)
+			warnings++
 		}
 
 		if e.Deleted {
 			deleted++
 			continue
 		}
+		if e.Storage == "" {
+			if e.SHA256 != "" {
+				e.Storage = manifest.StorageBlob
+			} else {
+				e.Storage = manifest.StorageGit
+			}
+		}
+		if e.Storage == manifest.StorageGit {
+			if !opts.RemoteOnly {
+				g := gdgit.New(a.Root)
+				tracked, err := g.IsTracked(rel)
+				if err != nil {
+					fmt.Printf("[warning] could not inspect Git tracking for %s: %v\n", rel, err)
+					warnings++
+				} else if !tracked {
+					fmt.Printf("[warning] manifest says git-managed but Git does not track it: %s\n", rel)
+					warnings++
+				}
+			}
+			continue
+		}
+		if e.Storage != manifest.StorageBlob {
+			fmt.Printf("[warning] unknown manifest storage %q for %s\n", e.Storage, rel)
+			warnings++
+			continue
+		}
 		if e.SHA256 == "" {
-			fmt.Printf("[error] missing sha256: %s\n", rel)
+			fmt.Printf("[error] missing sha256 for blob entry: %s\n", rel)
 			problems++
 			continue
 		}
@@ -148,22 +177,28 @@ func VerifyWithOptions(ctx context.Context, start string, opts VerifyOptions) er
 			warnings++
 		} else {
 			for _, rel := range trackedFiles {
+				if !workspace.IsGameDepotManagedPath(rel) {
+					continue
+				}
+				if e, ok := m.Entries[rel]; ok && !e.Deleted {
+					if e.Storage == manifest.StorageBlob {
+						fmt.Printf("[error] manifest says blob-managed but file is tracked by Git: %s\n", rel)
+						fmt.Printf("        suggestion: gamedepot submit will run git rm --cached, or run: git rm --cached -- %s\n", rel)
+						problems++
+					}
+					continue
+				}
 				class, err := workspace.ClassifyRel(rel, a.Config)
 				if err != nil {
 					fmt.Printf("[error] unsafe Git-tracked path: %s: %v\n", rel, err)
 					problems++
 					continue
 				}
-				switch class.Mode {
-				case rules.ModeBlob:
-					fmt.Printf("[error] blob-managed file is tracked by Git: %s\n", rel)
-					fmt.Printf("        suggestion: git rm --cached -- %s\n", rel)
-					problems++
-				case rules.ModeIgnore:
+				if class.Mode == rules.ModeIgnore || class.Mode == rules.ModeReview {
 					if isAllowedTrackedSupportFile(rel) {
 						continue
 					}
-					fmt.Printf("[warning] ignored/unmatched file is tracked by Git: %s\n", rel)
+					fmt.Printf("[warning] tracked file is not in manifest and current rules say %s: %s\n", class.Mode, rel)
 					warnings++
 				}
 			}
@@ -175,6 +210,9 @@ func VerifyWithOptions(ctx context.Context, start string, opts VerifyOptions) er
 			problems++
 		} else {
 			for _, f := range workspace.FilterByMode(files, rules.ModeGit) {
+				if !workspace.IsGameDepotManagedPath(f.Path) {
+					continue
+				}
 				tracked, err := g.IsTracked(f.Path)
 				if err != nil {
 					fmt.Printf("[warning] could not inspect Git tracking for %s: %v\n", f.Path, err)

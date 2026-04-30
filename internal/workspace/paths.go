@@ -67,3 +67,14 @@ func isWindowsAbs(p string) bool {
 	}
 	return strings.HasPrefix(p, "//")
 }
+
+// IsGameDepotManagedPath reports whether a project file should participate in
+// GameDepot asset routing and manifest history. For the UE5 template, GameDepot
+// owns Content/** only; plugins, Source, Config, Docs and other project files are
+// left to normal Git behavior.
+func IsGameDepotManagedPath(rel string) bool {
+	p := strings.ReplaceAll(rel, "\\", "/")
+	p = strings.TrimPrefix(strings.TrimSpace(p), "./")
+	p = strings.Trim(p, "/")
+	return p == "Content" || strings.HasPrefix(p, "Content/")
+}

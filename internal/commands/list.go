@@ -19,6 +19,7 @@ func List(ctx context.Context, start string, includeDeleted bool) error {
 	if err != nil {
 		return err
 	}
+	m.Normalize()
 
 	paths := make([]string, 0, len(m.Entries))
 	for p, e := range m.Entries {
@@ -30,14 +31,14 @@ func List(ctx context.Context, start string, includeDeleted bool) error {
 	sort.Strings(paths)
 
 	if len(paths) == 0 {
-		fmt.Println("No blob-managed files in manifest")
+		fmt.Println("No GameDepot-managed files in manifest")
 		return nil
 	}
 
-	fmt.Println("path                                      sha256        size        kind              deleted")
+	fmt.Println("path                                      storage  sha256        size        kind              deleted")
 	for _, p := range paths {
 		e := m.Entries[p]
-		fmt.Printf("%-40s  %-12s  %-10d  %-16s  %t\n", e.Path, shortSHA(e.SHA256), e.Size, e.Kind, e.Deleted)
+		fmt.Printf("%-40s  %-7s  %-12s  %-10d  %-16s  %t\n", e.Path, e.Storage, shortSHA(e.SHA256), e.Size, e.Kind, e.Deleted)
 	}
 
 	return nil

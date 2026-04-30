@@ -14,6 +14,7 @@ import (
 )
 
 type statusReport struct {
+	ReviewFiles  []workspace.FileInfo `json:"review_files"`
 	Added        []workspace.FileInfo `json:"added"`
 	Modified     []workspace.FileInfo `json:"modified"`
 	Deleted      []manifest.Entry     `json:"deleted"`
@@ -36,10 +37,23 @@ func Status(ctx context.Context, start string, jsonOut bool) error {
 			return err
 		}
 	}
+	pruneManifestToManagedPaths(&m)
 
-	files, err := workspace.Scan(a.Root, a.Config)
+	allFiles, err := workspace.ScanManaged(a.Root, a.Config)
 	if err != nil {
 		return err
+	}
+	managedFiles := make([]workspace.FileInfo, 0, len(allFiles))
+	for _, f := range allFiles {
+		if workspace.IsGameDepotManagedPath(f.Path) {
+			managedFiles = append(managedFiles, f)
+		}
+	}
+	files := make([]workspace.FileInfo, 0, len(managedFiles))
+	for _, f := range managedFiles {
+		if f.Mode == rules.ModeBlob || f.Mode == rules.ModeGit {
+			files = append(files, f)
+		}
 	}
 
 	blobFiles := workspace.FilterByMode(files, rules.ModeBlob)
@@ -47,11 +61,12 @@ func Status(ctx context.Context, start string, jsonOut bool) error {
 	d := manifest.Compare(m, blobFiles)
 
 	report := statusReport{
-		Added:     d.Added,
-		Modified:  d.Modified,
-		Deleted:   d.Deleted,
-		Unchanged: d.Unchanged,
-		GitFiles:  gitFiles,
+		ReviewFiles: workspace.ReviewFiles(managedFiles),
+		Added:       d.Added,
+		Modified:    d.Modified,
+		Deleted:     d.Deleted,
+		Unchanged:   d.Unchanged,
+		GitFiles:    gitFiles,
 	}
 
 	g := gdgit.New(a.Root)
@@ -68,12 +83,13 @@ func Status(ctx context.Context, start string, jsonOut bool) error {
 		return nil
 	}
 
+	printFileSection("Needs rule review", report.ReviewFiles)
 	printFileSection("Blob added", d.Added)
 	printFileSection("Blob modified", d.Modified)
 	printEntrySection("Blob deleted", d.Deleted)
 
 	if len(gitFiles) > 0 {
-		fmt.Println("Git-managed files matched by GameDepot rules:")
+		fmt.Println("Content Git files matched by GameDepot rules:")
 		for _, f := range gitFiles {
 			fmt.Printf("  %s  %s  %d bytes  %s\n", f.Path, shortSHA(f.SHA256), f.Size, f.Kind)
 		}
@@ -87,13 +103,16 @@ func Status(ctx context.Context, start string, jsonOut bool) error {
 	}
 
 	fmt.Printf(
-		"\nSummary: %d blob added, %d blob modified, %d blob deleted, %d blob unchanged, %d git-managed matched\n",
+		"\nSummary: %d blob added, %d blob modified, %d blob deleted, %d blob unchanged, %d Content git file(s)\n",
 		len(d.Added),
 		len(d.Modified),
 		len(d.Deleted),
 		len(d.Unchanged),
 		len(gitFiles),
 	)
+	if len(report.ReviewFiles) > 0 {
+		fmt.Printf("Review required: %d unmanaged file(s). Submit will fail until rules are added or --allow-unmanaged is used.\n", len(report.ReviewFiles))
+	}
 
 	return nil
 }

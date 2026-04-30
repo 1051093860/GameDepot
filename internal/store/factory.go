@@ -40,17 +40,18 @@ func NewFromProject(root string, project config.Config) (BlobStore, Info, error)
 		profileName = "local"
 	}
 
-	profile, ok := global.Profiles[profileName]
-	if !ok {
-		return nil, Info{}, fmt.Errorf("store profile %q not found in global config; run `gamedepot config profiles`", profileName)
-	}
-	if profile.Type == "" {
-		profile.Type = "local"
-	}
-
 	prefix := project.Store.Prefix
 	if prefix == "" {
 		prefix = config.DefaultStorePrefix(project.ProjectID)
+	}
+
+	profile, ok := global.Profiles[profileName]
+	if !ok {
+		path := filepath.Join(root, filepath.FromSlash(".gamedepot/remote_blobs"))
+		return NewLocalBlobStore(path), Info{Profile: "local", Type: "local", Path: path, Prefix: prefix}, nil
+	}
+	if profile.Type == "" {
+		profile.Type = "local"
 	}
 
 	switch profile.Type {
@@ -70,6 +71,10 @@ func NewFromProject(root string, project config.Config) (BlobStore, Info, error)
 		}, nil
 
 	case "s3":
+		if strings.TrimSpace(profile.Bucket) == "" {
+			path := filepath.Join(root, filepath.FromSlash(".gamedepot/remote_blobs"))
+			return NewLocalBlobStore(path), Info{Profile: profileName, Type: "local", Path: path, Prefix: prefix}, nil
+		}
 		cred, ok, err := config.ResolveCredentials(profileName)
 		if err != nil {
 			return nil, Info{}, err

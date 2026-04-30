@@ -1,0 +1,19 @@
+{
+  "FileVersion": 3,
+  "Version": 8,
+  "VersionName": "0.8.0-daemon-provider-full",
+  "FriendlyName": "GameDepot UE",
+  "Description": "UE editor UI for GameDepot daemon: Git/OSS routing, config, rules, history restore, submit and sync.",
+  "Category": "Source Control",
+  "CreatedBy": "GameDepot",
+  "CanContainContent": false,
+  "IsBetaVersion": true,
+  "Installed": false,
+  "Modules": [
+    {
+      "Name": "GameDepotUE",
+      "Type": "Editor",
+      "LoadingPhase": "Default"
+    }
+  ]
+}
