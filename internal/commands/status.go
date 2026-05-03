@@ -4,23 +4,23 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
+	"sort"
 
 	"github.com/1051093860/gamedepot/internal/app"
 	gdgit "github.com/1051093860/gamedepot/internal/git"
-	"github.com/1051093860/gamedepot/internal/manifest"
-	"github.com/1051093860/gamedepot/internal/rules"
+	"github.com/1051093860/gamedepot/internal/localindex"
+	gdrefs "github.com/1051093860/gamedepot/internal/refs"
 	"github.com/1051093860/gamedepot/internal/workspace"
 )
 
 type statusReport struct {
-	ReviewFiles  []workspace.FileInfo `json:"review_files"`
-	Added        []workspace.FileInfo `json:"added"`
-	Modified     []workspace.FileInfo `json:"modified"`
-	Deleted      []manifest.Entry     `json:"deleted"`
-	Unchanged    []workspace.FileInfo `json:"unchanged"`
-	GitFiles     []workspace.FileInfo `json:"git_files"`
-	GitPorcelain string               `json:"git_porcelain"`
+	Added        []string `json:"added"`
+	Modified     []string `json:"modified"`
+	Deleted      []string `json:"deleted"`
+	Stale        []string `json:"stale"`
+	Conflict     []string `json:"conflict"`
+	Unchanged    []string `json:"unchanged"`
+	GitPorcelain string   `json:"git_porcelain"`
 }
 
 func Status(ctx context.Context, start string, jsonOut bool) error {
@@ -28,52 +28,56 @@ func Status(ctx context.Context, start string, jsonOut bool) error {
 	if err != nil {
 		return err
 	}
-
-	m, err := manifest.Load(a.ManifestPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			m = manifest.New(a.Config.ProjectID)
-		} else {
-			return err
-		}
-	}
-	pruneManifestToManagedPaths(&m)
-
-	allFiles, err := workspace.ScanManaged(a.Root, a.Config)
+	refs, err := gdrefs.NewStore(a.Root).LoadAll()
 	if err != nil {
 		return err
 	}
-	managedFiles := make([]workspace.FileInfo, 0, len(allFiles))
-	for _, f := range allFiles {
-		if workspace.IsGameDepotManagedPath(f.Path) {
-			managedFiles = append(managedFiles, f)
+	idx, err := localindex.Load(a.Root)
+	if err != nil {
+		return err
+	}
+	localFiles, err := workspace.ScanManaged(a.Root, a.Config)
+	if err != nil {
+		return err
+	}
+	localByPath := map[string]workspace.FileInfo{}
+	for _, f := range localFiles {
+		localByPath[f.Path] = f
+	}
+
+	report := statusReport{}
+	seen := map[string]bool{}
+	for _, p := range sortedFileInfoPaths(localByPath) {
+		seen[p] = true
+		f := localByPath[p]
+		localOID := gdrefs.EnsureOID(f.SHA256)
+		baseOID := idx.BaseOID(p)
+		ref, hasRef := refs[p]
+		if !hasRef {
+			report.Added = append(report.Added, p)
+			continue
+		}
+		remoteOID := gdrefs.EnsureOID(ref.OID)
+		switch {
+		case localOID == remoteOID:
+			report.Unchanged = append(report.Unchanged, p)
+		case baseOID == remoteOID:
+			report.Modified = append(report.Modified, p)
+		case baseOID != "" && localOID == baseOID && remoteOID != baseOID:
+			report.Stale = append(report.Stale, p)
+		default:
+			report.Conflict = append(report.Conflict, p)
 		}
 	}
-	files := make([]workspace.FileInfo, 0, len(managedFiles))
-	for _, f := range managedFiles {
-		if f.Mode == rules.ModeBlob || f.Mode == rules.ModeGit {
-			files = append(files, f)
+	for _, p := range gdrefs.SortedPaths(refs) {
+		if !seen[p] {
+			report.Deleted = append(report.Deleted, p)
 		}
 	}
-
-	blobFiles := workspace.FilterByMode(files, rules.ModeBlob)
-	gitFiles := workspace.FilterByMode(files, rules.ModeGit)
-	d := manifest.Compare(m, blobFiles)
-
-	report := statusReport{
-		ReviewFiles: workspace.ReviewFiles(managedFiles),
-		Added:       d.Added,
-		Modified:    d.Modified,
-		Deleted:     d.Deleted,
-		Unchanged:   d.Unchanged,
-		GitFiles:    gitFiles,
-	}
-
 	g := gdgit.New(a.Root)
 	if out, err := g.StatusPorcelain(); err == nil {
 		report.GitPorcelain = out
 	}
-
 	if jsonOut {
 		data, err := json.MarshalIndent(report, "", "  ")
 		if err != nil {
@@ -82,66 +86,29 @@ func Status(ctx context.Context, start string, jsonOut bool) error {
 		fmt.Println(string(data))
 		return nil
 	}
-
-	printFileSection("Needs rule review", report.ReviewFiles)
-	printFileSection("Blob added", d.Added)
-	printFileSection("Blob modified", d.Modified)
-	printEntrySection("Blob deleted", d.Deleted)
-
-	if len(gitFiles) > 0 {
-		fmt.Println("Content Git files matched by GameDepot rules:")
-		for _, f := range gitFiles {
-			fmt.Printf("  %s  %s  %d bytes  %s\n", f.Path, shortSHA(f.SHA256), f.Size, f.Kind)
-		}
-		fmt.Println()
-	}
-
+	printPathSection("Content added", report.Added)
+	printPathSection("Content modified", report.Modified)
+	printPathSection("Content deleted", report.Deleted)
+	printPathSection("Content stale; run update before publish", report.Stale)
+	printPathSection("Content conflicts", report.Conflict)
 	if report.GitPorcelain != "" {
 		fmt.Println("Git working tree changes:")
 		fmt.Print(report.GitPorcelain)
 		fmt.Println()
 	}
-
-	fmt.Printf(
-		"\nSummary: %d blob added, %d blob modified, %d blob deleted, %d blob unchanged, %d Content git file(s)\n",
-		len(d.Added),
-		len(d.Modified),
-		len(d.Deleted),
-		len(d.Unchanged),
-		len(gitFiles),
-	)
-	if len(report.ReviewFiles) > 0 {
-		fmt.Printf("Review required: %d unmanaged file(s). Submit will fail until rules are added or --allow-unmanaged is used.\n", len(report.ReviewFiles))
-	}
-
+	fmt.Printf("\nSummary: %d added, %d modified, %d deleted, %d stale, %d conflicts, %d unchanged\n", len(report.Added), len(report.Modified), len(report.Deleted), len(report.Stale), len(report.Conflict), len(report.Unchanged))
 	return nil
 }
 
-func printFileSection(title string, files []workspace.FileInfo) {
-	if len(files) == 0 {
+func printPathSection(title string, paths []string) {
+	if len(paths) == 0 {
 		return
 	}
-
+	sort.Strings(paths)
 	fmt.Println(title + ":")
-
-	for _, f := range files {
-		fmt.Printf("  %s  %s  %d bytes  %s\n", f.Path, shortSHA(f.SHA256), f.Size, f.Kind)
+	for _, p := range paths {
+		fmt.Printf("  %s\n", p)
 	}
-
-	fmt.Println()
-}
-
-func printEntrySection(title string, entries []manifest.Entry) {
-	if len(entries) == 0 {
-		return
-	}
-
-	fmt.Println(title + ":")
-
-	for _, e := range entries {
-		fmt.Printf("  %s  %s  %d bytes  %s\n", e.Path, shortSHA(e.SHA256), e.Size, e.Kind)
-	}
-
 	fmt.Println()
 }
 
@@ -149,6 +116,5 @@ func shortSHA(s string) string {
 	if len(s) <= 12 {
 		return s
 	}
-
 	return s[:12]
 }

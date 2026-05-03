@@ -28,7 +28,7 @@ func SyncWithOptions(ctx context.Context, start string, opts SyncOptions) error 
 	if err != nil {
 		return err
 	}
-	return syncBlobs(ctx, a, opts.Force)
+	return materializeRefs(ctx, a, UpdateOptions{Force: opts.Force})
 }
 
 func syncBlobs(ctx context.Context, a *app.App, force bool) error {

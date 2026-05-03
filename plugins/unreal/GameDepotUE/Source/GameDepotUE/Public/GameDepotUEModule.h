@@ -12,6 +12,8 @@ class FGameDepotMockStatusProvider;
 class SGameDepotStatusPanel;
 class FGameDepotConfigManager;
 class SGameDepotConfigPanel;
+class SGameDepotOperationDialog;
+struct FGameDepotConflictItem;
 struct FGameDepotHistoryEntry;
 
 enum class EGameDepotToolbarState : uint8
@@ -46,6 +48,7 @@ private:
     FString DaemonToken;
     FProcHandle DaemonProcessHandle;
     TWeakPtr<class SNotificationItem> ActiveTaskNotification;
+    TWeakPtr<SGameDepotOperationDialog> OperationDialog;
     EGameDepotToolbarState ToolbarState = EGameDepotToolbarState::PendingUpdate;
     FString ToolbarStateMessage = TEXT("GameDepot is starting.");
 
@@ -65,8 +68,8 @@ private:
     void InitializeWorkspace();
     void OnConfigSaved();
     void RefreshData();
-    void Submit();
-    void Sync();
+    void Publish();
+    void Update();
     void ApplyRuleToPaths(const TArray<FString>& Paths, const FString& Mode);
     void ShowHistoryForPath(const FString& DepotPath);
     void RestoreHistoryVersion(const FString& DepotPath, const FGameDepotHistoryEntry& Entry);
@@ -74,10 +77,6 @@ private:
     void OnStatusPanelHistoryRestored(const FString& DepotPath);
 
     void SetToolbarState(EGameDepotToolbarState NewState, const FString& Message);
-    bool IsToolbarStateOK() const;
-    bool IsToolbarStateError() const;
-    bool IsToolbarStatePendingUpdate() const;
-
     TSharedRef<FExtender> OnExtendContentBrowserAssetSelectionMenu(const TArray<FAssetData>& SelectedAssets);
     void AddContentBrowserMenu(FMenuBuilder& MenuBuilder, TArray<FAssetData> SelectedAssets);
     void ShowSelectedInStatus(TArray<FAssetData> SelectedAssets);
@@ -97,9 +96,18 @@ private:
     FString GetAPILogFile() const;
     void LogJSON(const FString& Title, const FString& Text) const;
     void RequestJSON(const FString& Method, const FString& Path, const FString& Body, TFunction<void(bool, const FString&)> Callback);
+    void RequestJSONInternal(const FString& Method, const FString& Path, const FString& Body, TFunction<void(bool, const FString&)> Callback, bool bRetryOnNoResponse);
     FString PathsToJSONBody(const TArray<FString>& Paths, const FString& ExtraFields = FString()) const;
     void StartTaskEndpoint(const FString& Path, const FString& Body, const FString& FriendlyName);
     void PollTask(const FString& TaskID, const FString& FriendlyName);
+    void StartGameDepotOperation(const FString& FriendlyName, const FString& Path, const FString& Body);
+    void PollGameDepotOperation(const FString& TaskID, const FString& FriendlyName);
+    void ShowConflictDialog();
+    void ShowConflictDialogFromJSON(const FString& JsonText);
+    void ResolveConflict(const FString& DepotPath, const FString& Decision);
+    bool PromptPublishMessage(FString& OutMessage) const;
+    bool SaveDirtyContentPackages(const FString& Reason) const;
+    void RefreshContentBrowserAfterDepotChange();
     void PullConfigFromDaemon(bool bRefreshPanel);
     void PushConfigToDaemon(const struct FGameDepotConfigSnapshot& Snapshot);
     void RefreshOverview();

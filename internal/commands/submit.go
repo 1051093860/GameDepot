@@ -24,6 +24,10 @@ func Submit(ctx context.Context, start string, message string) error {
 }
 
 func SubmitWithOptions(ctx context.Context, start string, message string, opts SubmitOptions) error {
+	return Publish(ctx, start, message, PublishOptions{DryRun: opts.DryRun})
+}
+
+func submitWithManifestLegacy(ctx context.Context, start string, message string, opts SubmitOptions) error {
 	if message == "" && !opts.DryRun {
 		return fmt.Errorf("commit message is required")
 	}

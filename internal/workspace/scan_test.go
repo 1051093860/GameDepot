@@ -22,11 +22,11 @@ func TestScanUsesRules(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if len(FilterByMode(files, rules.ModeBlob)) != 1 {
+	if len(FilterByMode(files, rules.ModeBlob)) != 2 {
 		t.Fatalf("blob files = %+v", FilterByMode(files, rules.ModeBlob))
 	}
 	gitFiles := FilterByMode(files, rules.ModeGit)
-	if len(gitFiles) != 1 || gitFiles[0].Path != "Content/Data/table.csv" {
+	if len(gitFiles) != 0 {
 		t.Fatalf("git files = %+v", gitFiles)
 	}
 	for _, f := range files {

@@ -53,6 +53,8 @@ struct FGameDepotAssetRow
     EGameDepotSyncState Sync = EGameDepotSyncState::ReviewRequired;
     EGameDepotSeverity Severity = EGameDepotSeverity::Warning;
     FString DesiredRule;
+    FString ChangeState;
+    FString Kind;
     FString RemoteState;
     FString Message;
     FString ShortHash;

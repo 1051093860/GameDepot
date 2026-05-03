@@ -5,14 +5,15 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/1051093860/gamedepot/internal/commands"
-	"github.com/1051093860/gamedepot/internal/rules"
+	"github.com/1051093860/gamedepot/internal/smoke"
 	"github.com/1051093860/gamedepot/internal/ueapi"
 	"github.com/1051093860/gamedepot/internal/ueplugin"
 )
 
-var version = "v0.10.0"
+var version = "v0.13.0-pointer-refs-clone"
 
 func main() {
 	if err := run(); err != nil {
@@ -30,8 +31,55 @@ func run() error {
 	switch os.Args[1] {
 	case "init":
 		return runInit(ctx, os.Args[2:])
+	case "clone":
+		return runClone(ctx, os.Args[2:])
 	case "doctor":
 		return commands.Doctor(ctx, ".")
+	case "update":
+		fs := flag.NewFlagSet("update", flag.ExitOnError)
+		force := fs.Bool("force", false, "discard local conflicting Content changes")
+		strict := fs.Bool("strict", false, "abort if any local Content changes exist")
+		_ = fs.Parse(os.Args[2:])
+		return commands.Update(ctx, ".", commands.UpdateOptions{Force: *force, Strict: *strict})
+	case "conflicts":
+		fs := flag.NewFlagSet("conflicts", flag.ExitOnError)
+		jsonOut := fs.Bool("json", false, "print JSON")
+		_ = fs.Parse(os.Args[2:])
+		return commands.Conflicts(ctx, ".", *jsonOut)
+	case "resolve":
+		fs := flag.NewFlagSet("resolve", flag.ExitOnError)
+		useRemote := fs.Bool("remote", false, "use remote version")
+		useLocal := fs.Bool("local", false, "keep local version and publish it")
+		abort := fs.Bool("abort", false, "clear active conflict state")
+		_ = fs.Parse(os.Args[2:])
+		if *abort {
+			return commands.ResolveConflict(ctx, ".", "", "abort")
+		}
+		if fs.NArg() < 1 {
+			return fmt.Errorf("usage: gamedepot resolve <Content/path> (--remote|--local)")
+		}
+		if *useRemote == *useLocal {
+			return fmt.Errorf("choose exactly one of --remote or --local")
+		}
+		decision := "remote"
+		if *useLocal {
+			decision = "local"
+		}
+		return commands.ResolveConflict(ctx, ".", fs.Arg(0), decision)
+	case "publish":
+		fs := flag.NewFlagSet("publish", flag.ExitOnError)
+		msg := fs.String("m", "", "commit message")
+		dryRun := fs.Bool("dry-run", false, "print publish plan without changing files")
+		_ = fs.Parse(os.Args[2:])
+		return commands.Publish(ctx, ".", *msg, commands.PublishOptions{DryRun: *dryRun})
+	case "history":
+		fs := flag.NewFlagSet("history", flag.ExitOnError)
+		jsonOut := fs.Bool("json", false, "print JSON")
+		_ = fs.Parse(os.Args[2:])
+		if fs.NArg() < 1 {
+			return fmt.Errorf("usage: gamedepot history <Content/path> [--json]")
+		}
+		return commands.HistoryWithOptions(ctx, ".", fs.Arg(0), commands.HistoryOptions{JSON: *jsonOut})
 	case "status":
 		fs := flag.NewFlagSet("status", flag.ExitOnError)
 		jsonOut := fs.Bool("json", false, "print JSON")
@@ -43,21 +91,12 @@ func run() error {
 		remoteOnly := fs.Bool("remote-only", false, "skip local workspace checks")
 		_ = fs.Parse(os.Args[2:])
 		return commands.VerifyWithOptions(ctx, ".", commands.VerifyOptions{LocalOnly: *localOnly, RemoteOnly: *remoteOnly})
-	case "submit":
-		fs := flag.NewFlagSet("submit", flag.ExitOnError)
-		msg := fs.String("m", "", "commit message")
-		allow := fs.Bool("allow-unmanaged", false, "advanced: do not fail on review files")
+	case "smoke-test", "smoke":
+		fs := flag.NewFlagSet("smoke-test", flag.ExitOnError)
+		var opts smoke.PointerRefsOptions
+		smoke.RegisterPointerRefsFlags(fs, &opts)
 		_ = fs.Parse(os.Args[2:])
-		return commands.SubmitWithOptions(ctx, ".", *msg, commands.SubmitOptions{AllowUnmanaged: *allow})
-	case "push":
-		return commands.Push(ctx, ".")
-	case "pull":
-		return commands.Pull(ctx, ".")
-	case "sync":
-		fs := flag.NewFlagSet("sync", flag.ExitOnError)
-		force := fs.Bool("force", false, "discard local unsubmitted blob changes")
-		_ = fs.Parse(os.Args[2:])
-		return commands.SyncWithOptions(ctx, ".", commands.SyncOptions{Force: *force})
+		return smoke.RunPointerRefs(ctx, opts)
 	case "checkout":
 		fs := flag.NewFlagSet("checkout", flag.ExitOnError)
 		force := fs.Bool("force", false, "discard local unsubmitted blob changes while switching versions")
@@ -68,8 +107,6 @@ func run() error {
 		return commands.Checkout(ctx, ".", fs.Arg(0), commands.CheckoutOptions{Force: *force})
 	case "config":
 		return runConfig(ctx, os.Args[2:])
-	case "rules":
-		return runRules(ctx, os.Args[2:])
 	case "asset":
 		return runAsset(ctx, os.Args[2:])
 	case "store":
@@ -87,16 +124,18 @@ func run() error {
 	// Backward-compatible aliases hidden from help.
 	case "asset-status":
 		return runAsset(ctx, append([]string{"status"}, os.Args[2:]...))
-	case "history":
-		return runAsset(ctx, append([]string{"history"}, os.Args[2:]...))
 	case "restore-version":
 		return runAsset(ctx, append([]string{"restore"}, os.Args[2:]...))
 	case "revert-assets":
 		return runAsset(ctx, append([]string{"revert"}, os.Args[2:]...))
 	case "restore":
 		return runBlobRestore(ctx, os.Args[2:])
-	case "classify", "list", "ls", "repair-current-blob", "git-config", "project", "smoke-test", "cmd-smoke-test", "ue-api-smoke-test", "v08-core-smoke-test", "v08-api-smoke-test", "ue-plugin-smoke-test", "remote-smoke-test", "team-smoke-test":
-		return fmt.Errorf("%q has been removed or hidden in v0.8; use the structured commands shown by `gamedepot help`", os.Args[1])
+	case "pull", "sync", "submit", "push":
+		return fmt.Errorf("%q was removed in the pointer-refs CLI; use `gamedepot update` or `gamedepot publish -m <message>`", os.Args[1])
+	case "rules":
+		return fmt.Errorf("%q was removed; Content/** is always managed by GameDepot pointer refs", os.Args[1])
+	case "classify", "list", "ls", "repair-current-blob", "git-config", "project", "cmd-smoke-test", "ue-api-smoke-test", "v08-core-smoke-test", "v08-api-smoke-test", "ue-plugin-smoke-test", "remote-smoke-test", "team-smoke-test":
+		return fmt.Errorf("%q has been removed or hidden; use the structured commands shown by `gamedepot help`", os.Args[1])
 	default:
 		printUsage()
 		return fmt.Errorf("unknown command %q", os.Args[1])
@@ -106,14 +145,17 @@ func run() error {
 func runInit(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("init", flag.ExitOnError)
 	projectID := fs.String("project", "", "project id; defaults to .uproject name")
+	remoteURL := fs.String("remote", "", "Git remote URL to configure, for example a new empty GitHub repo")
+	remoteName := fs.String("remote-name", "origin", "Git remote name")
+	branch := fs.String("branch", "", "local branch/upstream name to configure, for example main")
 	noPlugin := fs.Bool("no-plugin", false, "do not install the UE plugin")
 	overwritePlugin := fs.Bool("overwrite-plugin", true, "overwrite existing GameDepotUE plugin")
-	_ = fs.Parse(args)
+	_ = fs.Parse(reorderFlags(args, map[string]bool{"no-plugin": true, "overwrite-plugin": true}))
 	root := "."
 	if fs.NArg() > 0 {
 		root = fs.Arg(0)
 	}
-	if err := commands.ProjectInitUE(ctx, root, commands.ProjectInitUEOptions{Project: *projectID, Profile: "local"}); err != nil {
+	if err := commands.ProjectInitUE(ctx, root, commands.ProjectInitUEOptions{Project: *projectID, Profile: "local", RemoteURL: *remoteURL, RemoteName: *remoteName, Branch: *branch}); err != nil {
 		return err
 	}
 	if !*noPlugin {
@@ -122,6 +164,51 @@ func runInit(ctx context.Context, args []string) error {
 		}
 	}
 	return nil
+}
+
+func runClone(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("clone", flag.ExitOnError)
+	branch := fs.String("branch", "", "branch to clone or initialize, for example main")
+	remoteName := fs.String("remote-name", "origin", "Git remote name")
+	projectID := fs.String("project", "", "project id used if cloning a plain UE repo without GameDepot config")
+	noUpdate := fs.Bool("no-update", false, "skip post-clone gamedepot update")
+	_ = fs.Parse(reorderFlags(args, map[string]bool{"no-update": true}))
+	if fs.NArg() < 1 {
+		return fmt.Errorf("usage: gamedepot clone [--branch <branch>] [--remote-name origin] [--no-update] <remote-url> [dir]")
+	}
+	remoteURL := fs.Arg(0)
+	dest := ""
+	if fs.NArg() > 1 {
+		dest = fs.Arg(1)
+	}
+	_, err := commands.Clone(ctx, remoteURL, dest, commands.CloneOptions{Branch: *branch, RemoteName: *remoteName, Project: *projectID, NoUpdate: *noUpdate})
+	return err
+}
+
+func reorderFlags(args []string, boolFlags map[string]bool) []string {
+	flags := make([]string, 0, len(args))
+	positionals := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "--" {
+			positionals = append(positionals, args[i+1:]...)
+			break
+		}
+		if strings.HasPrefix(a, "-") {
+			flags = append(flags, a)
+			name := strings.TrimLeft(a, "-")
+			if eq := strings.Index(name, "="); eq >= 0 {
+				continue
+			}
+			if !boolFlags[name] && i+1 < len(args) {
+				i++
+				flags = append(flags, args[i])
+			}
+			continue
+		}
+		positionals = append(positionals, a)
+	}
+	return append(flags, positionals...)
 }
 
 func runConfig(ctx context.Context, args []string) error {
@@ -194,66 +281,6 @@ func runConfig(ctx context.Context, args []string) error {
 	}
 }
 
-func runRules(ctx context.Context, args []string) error {
-	if len(args) < 1 {
-		return fmt.Errorf("usage: gamedepot rules <list|set|delete|move|enable|disable>")
-	}
-	switch args[0] {
-	case "list":
-		fs := flag.NewFlagSet("rules list", flag.ExitOnError)
-		jsonOut := fs.Bool("json", false, "")
-		_ = fs.Parse(args[1:])
-		return commands.RulesList(ctx, ".", *jsonOut)
-	case "set":
-		fs := flag.NewFlagSet("rules set", flag.ExitOnError)
-		mode := fs.String("mode", "", "git|blob|ignore")
-		scope := fs.String("scope", "exact", "exact|directory|extension|glob")
-		jsonOut := fs.Bool("json", false, "")
-		_ = fs.Parse(args[1:])
-		if *mode == "" || fs.NArg() < 1 {
-			return fmt.Errorf("usage: gamedepot rules set <pattern> --mode <git|blob|ignore> [--scope exact|directory|extension|glob]")
-		}
-		_, err := commands.RulesSet(ctx, ".", commands.RuleSetOptions{Paths: fs.Args(), Mode: rules.Mode(*mode), Scope: commands.RuleScope(*scope)}, *jsonOut)
-		return err
-	case "delete":
-		if len(args) < 2 {
-			return fmt.Errorf("usage: gamedepot rules delete <id-or-pattern>")
-		}
-		return commands.RulesDelete(ctx, ".", args[1])
-	case "move":
-		fs := flag.NewFlagSet("rules move", flag.ExitOnError)
-		up := fs.Bool("up", false, "")
-		down := fs.Bool("down", false, "")
-		_ = fs.Parse(args[1:])
-		if fs.NArg() < 1 {
-			return fmt.Errorf("usage: gamedepot rules move <id-or-pattern> --up|--down")
-		}
-		delta := 0
-		if *up {
-			delta = -1
-		}
-		if *down {
-			delta = 1
-		}
-		if delta == 0 {
-			return fmt.Errorf("rules move requires --up or --down")
-		}
-		return commands.RulesMove(ctx, ".", fs.Arg(0), delta)
-	case "enable":
-		if len(args) < 2 {
-			return fmt.Errorf("usage: gamedepot rules enable <id-or-pattern>")
-		}
-		return commands.RulesSetEnabled(ctx, ".", args[1], true)
-	case "disable":
-		if len(args) < 2 {
-			return fmt.Errorf("usage: gamedepot rules disable <id-or-pattern>")
-		}
-		return commands.RulesSetEnabled(ctx, ".", args[1], false)
-	default:
-		return fmt.Errorf("unknown rules subcommand %q", args[0])
-	}
-}
-
 func runAsset(ctx context.Context, args []string) error {
 	if len(args) < 1 {
 		return fmt.Errorf("usage: gamedepot asset <status|history|restore|revert>")
@@ -270,10 +297,13 @@ func runAsset(ctx context.Context, args []string) error {
 		}
 		return commands.AssetStatusCommand(ctx, ".", target, commands.AssetStatusOptions{JSON: *jsonOut, Recursive: *rec})
 	case "history":
-		if len(args) < 2 {
-			return fmt.Errorf("usage: gamedepot asset history <path>")
+		fs := flag.NewFlagSet("asset history", flag.ExitOnError)
+		jsonOut := fs.Bool("json", false, "print JSON")
+		_ = fs.Parse(args[1:])
+		if fs.NArg() < 1 {
+			return fmt.Errorf("usage: gamedepot asset history <path> [--json]")
 		}
-		return commands.History(ctx, ".", args[1])
+		return commands.HistoryWithOptions(ctx, ".", fs.Arg(0), commands.HistoryOptions{JSON: *jsonOut})
 	case "restore":
 		fs := flag.NewFlagSet("asset restore", flag.ExitOnError)
 		commit := fs.String("commit", "", "source commit")
@@ -399,15 +429,18 @@ func printUsage() {
 	fmt.Printf(`GameDepot %s
 
 Core:
-  gamedepot init [.] [--project <id>] [--no-plugin]
+  gamedepot init [.] [--project <id>] [--remote <url>] [--branch <branch>] [--no-plugin]
+  gamedepot clone [--branch <branch>] <remote-url> [dir]
   gamedepot status [--json]
-  gamedepot submit -m <message>
-  gamedepot push
-  gamedepot pull
-  gamedepot sync [--force]
+  gamedepot update [--force|--strict]
+  gamedepot conflicts [--json]
+  gamedepot resolve <Content/path> (--remote|--local)
+  gamedepot publish -m <message> [--dry-run]
+  gamedepot history <Content/path> [--json]
   gamedepot checkout <ref> [--force]
   gamedepot doctor
   gamedepot verify
+  gamedepot smoke-test [--workspace <dir>] [--clean] [--keep]
 
 Config:
   gamedepot config path
@@ -419,14 +452,6 @@ Config:
   gamedepot config set-credentials <profile> --access-key-id <id> --access-key-secret <secret>
   gamedepot config use <profile>
   gamedepot config project-use <profile>
-
-Rules:
-  gamedepot rules list [--json]
-  gamedepot rules set <pattern> --mode <git|blob|ignore> [--scope <exact|directory|extension|glob>]
-  gamedepot rules delete <id-or-pattern>
-  gamedepot rules move <id-or-pattern> --up|--down
-  gamedepot rules enable <id-or-pattern>
-  gamedepot rules disable <id-or-pattern>
 
 Assets:
   gamedepot asset status [path] [--recursive] [--json]

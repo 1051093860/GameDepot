@@ -19,30 +19,15 @@ type Classification struct {
 }
 
 func ClassifyRel(rel string, cfg config.Config) (Classification, error) {
+	_ = cfg // rules are kept only for backward-compatible config parsing.
 	clean, err := CleanRelPath(rel)
 	if err != nil {
 		return Classification{}, err
 	}
-
-	fc := rules.FileClassFor(clean, cfg.Rules)
-	// Strategy B for UE projects: GameDepot only classifies Content/** assets.
-	// Any non-Content path that is not explicitly ignored by a protected rule is
-	// handled directly by Git and must not become a GameDepot review blocker.
-	if fc.Mode == rules.ModeReview && !IsGameDepotManagedPath(clean) {
-		return Classification{
-			Path:    clean,
-			Mode:    rules.ModeGit,
-			Kind:    "git_native",
-			Matched: false,
-		}, nil
+	if IsGameDepotManagedPath(clean) {
+		return Classification{Path: clean, Mode: rules.ModeBlob, Kind: "content_asset", Matched: true}, nil
 	}
-	return Classification{
-		Path:        fc.Path,
-		Mode:        fc.Mode,
-		Kind:        fc.Kind,
-		RulePattern: fc.RulePattern,
-		Matched:     fc.Matched,
-	}, nil
+	return Classification{Path: clean, Mode: rules.ModeGit, Kind: "git_native", Matched: false}, nil
 }
 
 func ClassifyWalk(root string, cfg config.Config, targetRel string, includeUnmatched bool) ([]Classification, error) {
@@ -68,6 +53,10 @@ func ClassifyWalk(root string, cfg config.Config, targetRel string, includeUnmat
 		rel = filepath.ToSlash(rel)
 		if rel == "." {
 			return nil
+		}
+
+		if d.IsDir() && ShouldSkipDir(rel, cfg) {
+			return filepath.SkipDir
 		}
 
 		class, err := ClassifyRel(rel, cfg)

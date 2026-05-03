@@ -15,6 +15,7 @@ import (
 	gdgit "github.com/1051093860/gamedepot/internal/git"
 	"github.com/1051093860/gamedepot/internal/historyindex"
 	"github.com/1051093860/gamedepot/internal/manifest"
+	gdrefs "github.com/1051093860/gamedepot/internal/refs"
 	"github.com/1051093860/gamedepot/internal/workspace"
 )
 
@@ -247,6 +248,18 @@ func ComputeAssetStatusesWithOptions(ctx context.Context, a *app.App, target str
 }
 
 func loadStatusManifest(a *app.App) (manifest.Manifest, error) {
+	if info, err := os.Stat(a.ManifestPath); err == nil && info.IsDir() {
+		m := manifest.New(a.Config.ProjectID)
+		loaded, err := gdrefs.NewStore(a.Root).LoadAll()
+		if err != nil {
+			return manifest.Manifest{}, err
+		}
+		for _, p := range gdrefs.SortedPaths(loaded) {
+			r := loaded[p]
+			m.Upsert(manifest.Entry{Path: p, Storage: manifest.StorageBlob, SHA256: gdrefs.SHAFromOID(r.OID), Size: r.Size, Kind: r.Kind})
+		}
+		return m, nil
+	}
 	m, err := manifest.Load(a.ManifestPath)
 	if err != nil {
 		if os.IsNotExist(err) {

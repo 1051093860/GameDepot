@@ -1,6 +1,7 @@
 #include "GameDepotUEModule.h"
 
 #include "ContentBrowserModule.h"
+#include "AssetRegistry/AssetRegistryModule.h"
 #include "ContentBrowserDelegates.h"
 #include "Containers/Ticker.h"
 #include "Dom/JsonObject.h"
@@ -10,6 +11,8 @@
 #include "Framework/Notifications/NotificationManager.h"
 #include "GameDepotConfigManager.h"
 #include "GameDepotMockStatusProvider.h"
+#include "SGameDepotOperationDialog.h"
+#include "SGameDepotConflictDialog.h"
 #include "HttpModule.h"
 #include "IContentBrowserSingleton.h"
 #include "Interfaces/IHttpRequest.h"
@@ -20,6 +23,7 @@
 #include "Misc/ConfigCacheIni.h"
 #include "Misc/FileHelper.h"
 #include "Misc/MessageDialog.h"
+#include "FileHelpers.h"
 #include "Misc/Paths.h"
 #include "SGameDepotConfigPanel.h"
 #include "SGameDepotHistoryDialog.h"
@@ -30,6 +34,10 @@
 #include "ToolMenus.h"
 #include "Widgets/Docking/SDockTab.h"
 #include "Widgets/Notifications/SNotificationList.h"
+#include "Widgets/Input/SEditableTextBox.h"
+#include "Widgets/Input/SButton.h"
+#include "Widgets/Layout/SBorder.h"
+#include "Widgets/SBoxPanel.h"
 #include "Widgets/SWindow.h"
 #include "Widgets/Text/STextBlock.h"
 
@@ -126,7 +134,18 @@ FString ResolveExecutableFromPATH(const FString& ExecutableName)
     }
 #endif
 
-    const FString PathValue = FPlatformMisc::GetEnvironmentVariable(TEXT("PATH"));
+    FString PathValue = FPlatformMisc::GetEnvironmentVariable(TEXT("PATH"));
+#if PLATFORM_WINDOWS
+    if (PathValue.IsEmpty())
+    {
+        PathValue = FPlatformMisc::GetEnvironmentVariable(TEXT("Path"));
+    }
+    if (PathValue.IsEmpty())
+    {
+        PathValue = FPlatformMisc::GetEnvironmentVariable(TEXT("path"));
+    }
+#endif
+
     TArray<FString> PathDirs;
 #if PLATFORM_WINDOWS
     PathValue.ParseIntoArray(PathDirs, TEXT(";"), true);
@@ -219,6 +238,29 @@ void FGameDepotUEModule::LoadSettings()
     FString ConfiguredGameDepotExe;
     FString ConfiguredDaemonExe;
 
+    auto ApplyConfigFile = [&](const FString& IniPath)
+    {
+        if (!FPaths::FileExists(IniPath))
+        {
+            return;
+        }
+
+        FConfigFile File;
+        File.Read(IniPath);
+
+        bool BoolValue = false;
+        int32 IntValue = 0;
+        FString StringValue;
+
+        if (File.GetBool(TEXT("GameDepotUE"), TEXT("MockMode"), BoolValue)) bMockMode = BoolValue;
+        if (File.GetInt(TEXT("GameDepotUE"), TEXT("MaxMockAssets"), IntValue)) MaxMockAssets = IntValue;
+        if (File.GetString(TEXT("GameDepotUE"), TEXT("GameDepotExecutable"), StringValue) && !StringValue.TrimStartAndEnd().IsEmpty()) ConfiguredGameDepotExe = StringValue;
+        if (File.GetString(TEXT("GameDepotUE"), TEXT("GameDepotDaemonExecutable"), StringValue) && !StringValue.TrimStartAndEnd().IsEmpty()) ConfiguredDaemonExe = StringValue;
+        if (File.GetBool(TEXT("GameDepotUE"), TEXT("AutoStartDaemon"), BoolValue)) bAutoStartDaemon = BoolValue;
+        if (File.GetBool(TEXT("GameDepotUE"), TEXT("AutoShutdownDaemon"), BoolValue)) bAutoShutdownDaemon = BoolValue;
+        if (File.GetString(TEXT("GameDepotUE"), TEXT("DaemonListenAddress"), StringValue) && !StringValue.TrimStartAndEnd().IsEmpty()) DaemonListenAddress = StringValue;
+    };
+
     if (GConfig)
     {
         GConfig->GetBool(TEXT("GameDepotUE"), TEXT("MockMode"), bMockMode, GGameIni);
@@ -229,6 +271,11 @@ void FGameDepotUEModule::LoadSettings()
         GConfig->GetBool(TEXT("GameDepotUE"), TEXT("AutoShutdownDaemon"), bAutoShutdownDaemon, GGameIni);
         GConfig->GetString(TEXT("GameDepotUE"), TEXT("DaemonListenAddress"), DaemonListenAddress, GGameIni);
     }
+
+    // GameDepot writes Config/DefaultGameDepotUE.ini during `gamedepot init`.
+    // This file is not part of Unreal's GGameIni chain, so read it explicitly.
+    ApplyConfigFile(FPaths::Combine(ProjectRoot, TEXT("Config"), TEXT("DefaultGameDepotUE.ini")));
+
     MaxMockAssets = FMath::Clamp(MaxMockAssets, 20, 5000);
     if (DaemonListenAddress.IsEmpty()) DaemonListenAddress = TEXT("127.0.0.1:0");
 
@@ -266,7 +313,7 @@ void FGameDepotUEModule::RegisterMenus()
     {
         FToolMenuSection& Section = Menu->FindOrAddSection("GameDepot");
         Section.Label = LOCTEXT("GameDepotSection", "GameDepot");
-        Section.AddMenuEntry("GameDepotOpenStatus", LOCTEXT("OpenStatus", "Asset Status Browser"), LOCTEXT("OpenStatusTooltip", "Open GameDepot asset status UI."), FSlateIcon(FAppStyle::GetAppStyleSetName(), "LevelEditor.Tabs.ContentBrowser"), FUIAction(FExecuteAction::CreateRaw(this, &FGameDepotUEModule::OpenStatusTab)));
+        Section.AddMenuEntry("GameDepotOpenStatus", LOCTEXT("OpenStatus", "Changes"), LOCTEXT("OpenStatusTooltip", "Open local changes and conflict list."), FSlateIcon(FAppStyle::GetAppStyleSetName(), "LevelEditor.Tabs.ContentBrowser"), FUIAction(FExecuteAction::CreateRaw(this, &FGameDepotUEModule::OpenStatusTab)));
         Section.AddMenuEntry("GameDepotOpenConfig", LOCTEXT("OpenConfig", "Configuration Manager"), LOCTEXT("OpenConfigTooltip", "Configure OSS/blob storage and rules."), FSlateIcon(FAppStyle::GetAppStyleSetName(), "Icons.Settings"), FUIAction(FExecuteAction::CreateRaw(this, &FGameDepotUEModule::OpenConfigTab)));
         Section.AddMenuEntry("GameDepotInitCheck", LOCTEXT("InitCheck", "Run Initialization Check"), LOCTEXT("InitCheckTooltip", "Check or initialize GameDepot for this project."), FSlateIcon(FAppStyle::GetAppStyleSetName(), "Icons.Warning"), FUIAction(FExecuteAction::CreateRaw(this, &FGameDepotUEModule::PromptInitializeIfNeeded)));
         Section.AddMenuEntry("GameDepotRefresh", LOCTEXT("RefreshStatus", "Refresh Status"), LOCTEXT("RefreshStatusTooltip", "Refresh GameDepot status."), FSlateIcon(FAppStyle::GetAppStyleSetName(), "Icons.Refresh"), FUIAction(FExecuteAction::CreateRaw(this, &FGameDepotUEModule::RefreshData)));
@@ -275,22 +322,16 @@ void FGameDepotUEModule::RegisterMenus()
     if (UToolMenu* Toolbar = UToolMenus::Get()->ExtendMenu("LevelEditor.LevelEditorToolBar.User"))
     {
         FToolMenuSection& Section = Toolbar->FindOrAddSection("GameDepot");
-        Section.AddEntry(FToolMenuEntry::InitToolBarButton("GameDepotOpenStatusToolbar", FUIAction(FExecuteAction::CreateRaw(this, &FGameDepotUEModule::OpenStatusTab)), LOCTEXT("ToolbarStatus", "Status"), LOCTEXT("ToolbarStatusTooltip", "Open GameDepot asset status browser."), FSlateIcon(FAppStyle::GetAppStyleSetName(), "LevelEditor.Tabs.ContentBrowser")));
-        Section.AddEntry(FToolMenuEntry::InitToolBarButton("GameDepotOpenConfigToolbar", FUIAction(FExecuteAction::CreateRaw(this, &FGameDepotUEModule::OpenConfigTab)), LOCTEXT("ToolbarConfig", "Config"), LOCTEXT("ToolbarConfigTooltip", "Open GameDepot configuration manager."), FSlateIcon(FAppStyle::GetAppStyleSetName(), "Icons.Settings")));
-        Section.AddEntry(FToolMenuEntry::InitToolBarButton("GameDepotSyncToolbar", FUIAction(FExecuteAction::CreateRaw(this, &FGameDepotUEModule::Sync)), LOCTEXT("ToolbarSync", "Sync"), LOCTEXT("ToolbarSyncTooltip", "Run GameDepot sync."), FSlateIcon(FAppStyle::GetAppStyleSetName(), "Icons.Refresh")));
-        Section.AddEntry(FToolMenuEntry::InitToolBarButton("GameDepotSubmitToolbar", FUIAction(FExecuteAction::CreateRaw(this, &FGameDepotUEModule::Submit)), LOCTEXT("ToolbarSubmit", "Submit"), LOCTEXT("ToolbarSubmitTooltip", "Submit Git/OSS changes through GameDepot."), FSlateIcon(FAppStyle::GetAppStyleSetName(), "Icons.Upload")));
-        Section.AddSeparator("GameDepotToolbarStateSeparator");
-        Section.AddEntry(FToolMenuEntry::InitToolBarButton("GameDepotStateOKToolbar", FUIAction(FExecuteAction::CreateRaw(this, &FGameDepotUEModule::OpenStatusTab), FCanExecuteAction::CreateRaw(this, &FGameDepotUEModule::IsToolbarStateOK)), LOCTEXT("ToolbarStateOK", "OK"), LOCTEXT("ToolbarStateOKTooltip", "Last operation completed successfully."), FSlateIcon(FAppStyle::GetAppStyleSetName(), "Icons.Check")));
-        Section.AddEntry(FToolMenuEntry::InitToolBarButton("GameDepotStateErrorToolbar", FUIAction(FExecuteAction::CreateRaw(this, &FGameDepotUEModule::OpenStatusTab), FCanExecuteAction::CreateRaw(this, &FGameDepotUEModule::IsToolbarStateError)), LOCTEXT("ToolbarStateError", "Error"), LOCTEXT("ToolbarStateErrorTooltip", "Last operation had errors."), FSlateIcon(FAppStyle::GetAppStyleSetName(), "Icons.Error")));
-        Section.AddEntry(FToolMenuEntry::InitToolBarButton("GameDepotStatePendingToolbar", FUIAction(FExecuteAction::CreateRaw(this, &FGameDepotUEModule::OpenStatusTab), FCanExecuteAction::CreateRaw(this, &FGameDepotUEModule::IsToolbarStatePendingUpdate)), LOCTEXT("ToolbarStatePending", "Update"), LOCTEXT("ToolbarStatePendingTooltip", "Pending sync or submit."), FSlateIcon(FAppStyle::GetAppStyleSetName(), "Icons.Warning")));
+        Section.AddEntry(FToolMenuEntry::InitToolBarButton("GameDepotUpdateToolbar", FUIAction(FExecuteAction::CreateRaw(this, &FGameDepotUEModule::Update)), LOCTEXT("ToolbarUpdate", "Update"), LOCTEXT("ToolbarUpdateTooltip", "Update Content assets through GameDepot. Conflicts will open the resolver."), FSlateIcon(FAppStyle::GetAppStyleSetName(), "Icons.Download")));
+        Section.AddEntry(FToolMenuEntry::InitToolBarButton("GameDepotPublishToolbar", FUIAction(FExecuteAction::CreateRaw(this, &FGameDepotUEModule::Publish)), LOCTEXT("ToolbarPublish", "Publish"), LOCTEXT("ToolbarPublishTooltip", "Publish local Content changes through GameDepot. Conflicts will open the resolver."), FSlateIcon(FAppStyle::GetAppStyleSetName(), "Icons.Upload")));
     }
 }
 
 void FGameDepotUEModule::RegisterStatusTab()
 {
     FGlobalTabmanager::Get()->RegisterNomadTabSpawner(GameDepotStatusTabName, FOnSpawnTab::CreateRaw(this, &FGameDepotUEModule::SpawnStatusTab))
-        .SetDisplayName(LOCTEXT("StatusTabTitle", "GameDepot Status"))
-        .SetTooltipText(LOCTEXT("StatusTabTooltip", "Git/OSS routing and sync status."))
+        .SetDisplayName(LOCTEXT("StatusTabTitle", "GameDepot Changes"))
+        .SetTooltipText(LOCTEXT("StatusTabTooltip", "Local Content changes and conflicts."))
         .SetIcon(FSlateIcon(FAppStyle::GetAppStyleSetName(), "LevelEditor.Tabs.ContentBrowser"));
 }
 
@@ -425,7 +466,7 @@ void FGameDepotUEModule::OnConfigSaved()
     ConfigManager->Load();
     if (bMockMode)
     {
-        SetToolbarState(EGameDepotToolbarState::PendingUpdate, TEXT("Mock config changed. Sync or submit is pending."));
+        SetToolbarState(EGameDepotToolbarState::PendingUpdate, TEXT("Mock config changed. Update or publish is pending."));
         Notify(TEXT("GameDepot mock config saved."));
         return;
     }
@@ -443,9 +484,9 @@ void FGameDepotUEModule::RefreshData()
         return;
     }
     if (!EnsureDaemon()) return;
-    RequestJSON(TEXT("POST"), TEXT("/api/ue/v1/assets/status"), TEXT("{\"paths\":[],\"include_history\":true,\"include_remote\":false}"), [this](bool bOK, const FString& Text)
+    RequestJSON(TEXT("POST"), TEXT("/api/ue/v1/assets/changes"), TEXT("{\"exact_hash\":false,\"limit\":500}"), [this](bool bOK, const FString& Text)
     {
-        if (!bOK) { SetToolbarState(EGameDepotToolbarState::Error, Text); Notify(TEXT("Refresh status failed.")); return; }
+        if (!bOK) { SetToolbarState(EGameDepotToolbarState::Error, Text); Notify(TEXT("Refresh changes failed.")); return; }
         FString Error;
         if (!Provider->ReplaceRowsFromDaemonJSON(Text, Error)) { SetToolbarState(EGameDepotToolbarState::Error, Error); Notify(Error); return; }
         if (TSharedPtr<SGameDepotStatusPanel> Panel = StatusPanel.Pin()) Panel->RefreshRows();
@@ -453,32 +494,48 @@ void FGameDepotUEModule::RefreshData()
     });
 }
 
-void FGameDepotUEModule::Submit()
+void FGameDepotUEModule::Publish()
 {
     if (bMockMode)
     {
-        const int32 ErrorCount = Provider.IsValid() ? Provider->CountBySeverity(EGameDepotSeverity::Error) : 0;
-        const int32 ReviewCount = Provider.IsValid() ? Provider->CountBySync(EGameDepotSyncState::ReviewRequired) : 0;
-        SetToolbarState((ErrorCount || ReviewCount) ? EGameDepotToolbarState::Error : EGameDepotToolbarState::OK, (ErrorCount || ReviewCount) ? FString::Printf(TEXT("Mock submit blocked: %d errors, %d review."), ErrorCount, ReviewCount) : TEXT("Mock submit succeeded."));
+        SetToolbarState(EGameDepotToolbarState::OK, TEXT("Mock publish succeeded."));
         Notify(ToolbarStateMessage);
         return;
     }
     if (!EnsureDaemon()) return;
-    const EAppReturnType::Type Choice = FMessageDialog::Open(EAppMsgType::YesNo, LOCTEXT("SubmitConfirm", "Submit all saved changes through GameDepot?"));
-    if (Choice != EAppReturnType::Yes) return;
-    StartTaskEndpoint(TEXT("/api/ue/v1/submit"), TEXT("{\"message\":\"Submit from Unreal Editor\",\"push\":false,\"verify_after_submit\":false}"), TEXT("Submit"));
+
+    FString Message;
+    if (!PromptPublishMessage(Message))
+    {
+        return;
+    }
+    if (!SaveDirtyContentPackages(TEXT("Publish")))
+    {
+        Notify(TEXT("Publish cancelled: assets were not saved."));
+        return;
+    }
+
+    const FString Body = FString::Printf(TEXT("{\"message\":%s,\"async\":true}"), *QuoteJSON(Message));
+    StartGameDepotOperation(TEXT("Publish"), TEXT("/api/ue/v1/publish"), Body);
 }
 
-void FGameDepotUEModule::Sync()
+void FGameDepotUEModule::Update()
 {
     if (bMockMode)
     {
-        SetToolbarState(EGameDepotToolbarState::OK, TEXT("Mock sync succeeded."));
+        SetToolbarState(EGameDepotToolbarState::OK, TEXT("Mock update succeeded."));
         Notify(ToolbarStateMessage);
         return;
     }
     if (!EnsureDaemon()) return;
-    StartTaskEndpoint(TEXT("/api/ue/v1/sync"), TEXT("{\"force\":false}"), TEXT("Sync"));
+
+    if (!SaveDirtyContentPackages(TEXT("Update")))
+    {
+        Notify(TEXT("Update cancelled: assets were not saved."));
+        return;
+    }
+
+    StartGameDepotOperation(TEXT("Update"), TEXT("/api/ue/v1/update"), TEXT("{\"mode\":\"normal\",\"async\":true}"));
 }
 
 void FGameDepotUEModule::ApplyRuleToPaths(const TArray<FString>& Paths, const FString& Mode)
@@ -496,7 +553,7 @@ void FGameDepotUEModule::ApplyRuleToPaths(const TArray<FString>& Paths, const FS
     const FString Body = PathsToJSONBody(Paths, FString::Printf(TEXT("\"mode\":%s,\"kind\":%s,\"scope\":\"exact\""), *QuoteJSON(Mode), *QuoteJSON(Kind)));
     RequestJSON(TEXT("POST"), TEXT("/api/ue/v1/rules/upsert"), Body, [this, Mode](bool bOK, const FString& Text)
     {
-        if (bOK) { SetToolbarState(EGameDepotToolbarState::PendingUpdate, FString::Printf(TEXT("Rule changed to %s. Submit is pending."), *Mode)); RefreshData(); }
+        if (bOK) { SetToolbarState(EGameDepotToolbarState::PendingUpdate, FString::Printf(TEXT("Rule changed to %s. Publish is pending."), *Mode)); RefreshData(); }
         else { SetToolbarState(EGameDepotToolbarState::Error, Text); Notify(TEXT("Set rule failed.")); }
     });
 }
@@ -557,7 +614,7 @@ void FGameDepotUEModule::RevertPaths(const TArray<FString>& Paths)
 
 void FGameDepotUEModule::OnStatusPanelHistoryRestored(const FString& DepotPath)
 {
-    SetToolbarState(EGameDepotToolbarState::PendingUpdate, FString::Printf(TEXT("History version restored for %s. Submit is pending."), *DepotPath));
+    SetToolbarState(EGameDepotToolbarState::PendingUpdate, FString::Printf(TEXT("History version restored for %s. Publish is pending."), *DepotPath));
     RefreshData();
 }
 
@@ -567,10 +624,6 @@ void FGameDepotUEModule::SetToolbarState(EGameDepotToolbarState NewState, const 
     ToolbarStateMessage = Message;
     if (UToolMenus::IsToolMenuUIEnabled()) UToolMenus::Get()->RefreshAllWidgets();
 }
-
-bool FGameDepotUEModule::IsToolbarStateOK() const { return ToolbarState == EGameDepotToolbarState::OK; }
-bool FGameDepotUEModule::IsToolbarStateError() const { return ToolbarState == EGameDepotToolbarState::Error; }
-bool FGameDepotUEModule::IsToolbarStatePendingUpdate() const { return ToolbarState == EGameDepotToolbarState::PendingUpdate; }
 
 TSharedRef<FExtender> FGameDepotUEModule::OnExtendContentBrowserAssetSelectionMenu(const TArray<FAssetData>& SelectedAssets)
 {
@@ -585,13 +638,9 @@ TSharedRef<FExtender> FGameDepotUEModule::OnExtendContentBrowserAssetSelectionMe
 void FGameDepotUEModule::AddContentBrowserMenu(FMenuBuilder& MenuBuilder, TArray<FAssetData> SelectedAssets)
 {
     MenuBuilder.BeginSection("GameDepot", LOCTEXT("GameDepotMenuHeading", "GameDepot"));
-    MenuBuilder.AddMenuEntry(FUIAction(FExecuteAction::CreateLambda([this, SelectedAssets]() { ShowSelectedInStatus(SelectedAssets); })), MakeGameDepotMenuLabel(LOCTEXT("ShowInStatus", "Show in GameDepot Status")), NAME_None, LOCTEXT("ShowInStatusTooltip", "Open GameDepot status tab."));
+    MenuBuilder.AddMenuEntry(FUIAction(FExecuteAction::CreateLambda([this, SelectedAssets]() { ShowSelectedInStatus(SelectedAssets); })), MakeGameDepotMenuLabel(LOCTEXT("ShowInStatus", "Show in GameDepot Changes")), NAME_None, LOCTEXT("ShowInStatusTooltip", "Open GameDepot changes tab." ));
     MenuBuilder.AddMenuEntry(FUIAction(FExecuteAction::CreateLambda([this, SelectedAssets]() { ShowSelectedHistory(SelectedAssets); })), MakeGameDepotMenuLabel(LOCTEXT("ShowHistory", "Show History Versions...")), NAME_None, LOCTEXT("ShowHistoryTooltip", "Show Git/OSS history versions."));
-    MenuBuilder.AddMenuEntry(FUIAction(FExecuteAction::CreateLambda([this, SelectedAssets]() { RevertSelectedUncommittedChanges(SelectedAssets); })), MakeGameDepotMenuLabel(LOCTEXT("RevertUncommitted", "Revert Unsubmitted Changes")), NAME_None, LOCTEXT("RevertUncommittedTooltip", "Discard local unsubmitted changes."));
-    MenuBuilder.AddMenuSeparator();
-    MenuBuilder.AddMenuEntry(FUIAction(FExecuteAction::CreateLambda([this, SelectedAssets]() { SetSelectedRule(SelectedAssets, TEXT("blob")); })), MakeGameDepotMenuLabel(LOCTEXT("SetRuleOSS", "Set Rule: OSS / Blob")), NAME_None, LOCTEXT("SetRuleOSSTooltip", "Route selected assets through OSS/blob storage."));
-    MenuBuilder.AddMenuEntry(FUIAction(FExecuteAction::CreateLambda([this, SelectedAssets]() { SetSelectedRule(SelectedAssets, TEXT("git")); })), MakeGameDepotMenuLabel(LOCTEXT("SetRuleGit", "Set Rule: Git")), NAME_None, LOCTEXT("SetRuleGitTooltip", "Route selected assets directly through Git."));
-    MenuBuilder.AddMenuEntry(FUIAction(FExecuteAction::CreateLambda([this, SelectedAssets]() { SetSelectedRule(SelectedAssets, TEXT("ignore")); })), MakeGameDepotMenuLabel(LOCTEXT("SetRuleIgnore", "Set Rule: Ignore")), NAME_None, LOCTEXT("SetRuleIgnoreTooltip", "Ignore selected assets."));
+    MenuBuilder.AddMenuEntry(FUIAction(FExecuteAction::CreateLambda([this, SelectedAssets]() { RevertSelectedUncommittedChanges(SelectedAssets); })), MakeGameDepotMenuLabel(LOCTEXT("RevertUncommitted", "Revert Local Changes")), NAME_None, LOCTEXT("RevertUncommittedTooltip", "Discard local unpublished changes."));
     MenuBuilder.EndSection();
 }
 
@@ -709,28 +758,68 @@ void FGameDepotUEModule::LogJSON(const FString& Title, const FString& Text) cons
 
 void FGameDepotUEModule::RequestJSON(const FString& Method, const FString& Path, const FString& Body, TFunction<void(bool, const FString&)> Callback)
 {
+    RequestJSONInternal(Method, Path, Body, MoveTemp(Callback), true);
+}
+
+void FGameDepotUEModule::RequestJSONInternal(const FString& Method, const FString& Path, const FString& Body, TFunction<void(bool, const FString&)> Callback, bool bRetryOnNoResponse)
+{
     if (DaemonAddress.IsEmpty() && !EnsureDaemon())
     {
-        Callback(false, TEXT("daemon_not_ready")); return;
+        Callback(false, TEXT("daemon_not_ready"));
+        return;
     }
+
     const FString URL = GetURL(Path);
     LogJSON(FString::Printf(TEXT("REQUEST %s %s"), *Method, *Path), Body.IsEmpty() ? TEXT("<empty>") : Body);
+
     TSharedRef<IHttpRequest, ESPMode::ThreadSafe> Request = FHttpModule::Get().CreateRequest();
     Request->SetURL(URL);
     Request->SetVerb(Method);
     Request->SetHeader(TEXT("Content-Type"), TEXT("application/json"));
     if (!DaemonToken.IsEmpty()) Request->SetHeader(TEXT("Authorization"), TEXT("Bearer ") + DaemonToken);
     if (!Body.IsEmpty()) Request->SetContentAsString(Body);
-    Request->OnProcessRequestComplete().BindLambda([this, Method, Path, URL, Body, Callback](FHttpRequestPtr Req, FHttpResponsePtr Resp, bool bTransportOK)
+
+    TSharedRef<TFunction<void(bool, const FString&)>> CallbackRef = MakeShared<TFunction<void(bool, const FString&)>>(MoveTemp(Callback));
+    Request->OnProcessRequestComplete().BindLambda([this, Method, Path, URL, Body, CallbackRef, bRetryOnNoResponse](FHttpRequestPtr Req, FHttpResponsePtr Resp, bool bTransportOK)
     {
         const FString Text = Resp.IsValid() ? Resp->GetContentAsString() : TEXT("<no response>");
         const int32 Code = Resp.IsValid() ? Resp->GetResponseCode() : 0;
         const bool bSuccess = bTransportOK && Resp.IsValid() && Code >= 200 && Code < 300;
         FString Full = FString::Printf(TEXT("Method: %s\nPath: %s\nURL: %s\nHTTPStatus: %d\nResponseBody:\n%s"), *Method, *Path, *URL, Code, *Text);
         LogJSON(FString::Printf(TEXT("RESPONSE %s HTTP %d"), *Path, Code), Full);
-        Callback(bSuccess, bSuccess ? Text : Full);
+
+        const bool bNoResponse = !bTransportOK || !Resp.IsValid() || Code == 0;
+        if (!bSuccess && bNoResponse && bRetryOnNoResponse)
+        {
+            LogJSON(TEXT("GameDepot daemon reconnect"), TEXT("No HTTP response from cached daemon address. Deleting runtime file and starting a fresh daemon."));
+            DaemonAddress.Reset();
+            DaemonToken.Reset();
+            IFileManager::Get().Delete(*GetRuntimeFile(), false, true, true);
+            if (bAutoStartDaemon && LaunchDaemon())
+            {
+                RequestJSONInternal(Method, Path, Body, MoveTemp(*CallbackRef), false);
+                return;
+            }
+        }
+
+        (*CallbackRef)(bSuccess, bSuccess ? Text : Full);
     });
-    if (!Request->ProcessRequest()) Callback(false, FString::Printf(TEXT("HTTP request start failed: %s"), *URL));
+
+    if (!Request->ProcessRequest())
+    {
+        if (bRetryOnNoResponse)
+        {
+            DaemonAddress.Reset();
+            DaemonToken.Reset();
+            IFileManager::Get().Delete(*GetRuntimeFile(), false, true, true);
+            if (bAutoStartDaemon && LaunchDaemon())
+            {
+                RequestJSONInternal(Method, Path, Body, MoveTemp(*CallbackRef), false);
+                return;
+            }
+        }
+        (*CallbackRef)(false, FString::Printf(TEXT("HTTP request start failed: %s"), *URL));
+    }
 }
 
 FString FGameDepotUEModule::PathsToJSONBody(const TArray<FString>& Paths, const FString& ExtraFields) const
@@ -793,6 +882,266 @@ void FGameDepotUEModule::PollTask(const FString& TaskID, const FString& Friendly
     });
 }
 
+void FGameDepotUEModule::StartGameDepotOperation(const FString& FriendlyName, const FString& Path, const FString& Body)
+{
+    TSharedRef<SWindow> Window = SNew(SWindow)
+        .Title(FText::FromString(TEXT("GameDepot ") + FriendlyName))
+        .ClientSize(FVector2D(720.0f, 420.0f))
+        .SupportsMaximize(false)
+        .SupportsMinimize(false);
+
+    TSharedRef<SGameDepotOperationDialog> Dialog = SNew(SGameDepotOperationDialog).OperationName(TEXT("GameDepot ") + FriendlyName);
+    OperationDialog = Dialog;
+    Window->SetContent(Dialog);
+    FSlateApplication::Get().AddWindow(Window);
+
+    Dialog->AppendLog(FriendlyName + TEXT(" requested."));
+    RequestJSON(TEXT("POST"), Path, Body, [this, FriendlyName](bool bOK, const FString& Text)
+    {
+        FString TaskID;
+        if (bOK && TryGetStringField(Text, TEXT("task_id"), TaskID))
+        {
+            PollGameDepotOperation(TaskID, FriendlyName);
+            return;
+        }
+        if (TSharedPtr<SGameDepotOperationDialog> Dialog = OperationDialog.Pin())
+        {
+            Dialog->SetFailed(Text);
+        }
+        SetToolbarState(EGameDepotToolbarState::Error, Text);
+        Notify(FriendlyName + TEXT(" failed to start."));
+        ShowConflictDialog();
+    });
+}
+
+void FGameDepotUEModule::PollGameDepotOperation(const FString& TaskID, const FString& FriendlyName)
+{
+    RequestJSON(TEXT("GET"), TEXT("/api/ue/v1/tasks/") + TaskID, TEXT(""), [this, TaskID, FriendlyName](bool bOK, const FString& Text)
+    {
+        if (!bOK)
+        {
+            if (TSharedPtr<SGameDepotOperationDialog> Dialog = OperationDialog.Pin())
+            {
+                Dialog->SetFailed(Text);
+            }
+            SetToolbarState(EGameDepotToolbarState::Error, Text);
+            Notify(FriendlyName + TEXT(" task poll failed."));
+            return;
+        }
+
+        TSharedPtr<FJsonObject> TaskObj;
+        if (!TryGetObjectField(Text, TEXT("task"), TaskObj) || !TaskObj.IsValid())
+        {
+            SetToolbarState(EGameDepotToolbarState::Error, TEXT("Invalid task response."));
+            return;
+        }
+
+        FString Status, Phase, Message, Error;
+        TaskObj->TryGetStringField(TEXT("status"), Status);
+        TaskObj->TryGetStringField(TEXT("phase"), Phase);
+        TaskObj->TryGetStringField(TEXT("message"), Message);
+        TaskObj->TryGetStringField(TEXT("error"), Error);
+
+        double CurrentNumber = 0.0;
+        double TotalNumber = 0.0;
+        double PercentNumber = 0.0;
+        TaskObj->TryGetNumberField(TEXT("current"), CurrentNumber);
+        TaskObj->TryGetNumberField(TEXT("total"), TotalNumber);
+        TaskObj->TryGetNumberField(TEXT("percent"), PercentNumber);
+
+        TArray<FString> Logs;
+        const TArray<TSharedPtr<FJsonValue>>* LogValues = nullptr;
+        if (TaskObj->TryGetArrayField(TEXT("logs"), LogValues) && LogValues)
+        {
+            for (const TSharedPtr<FJsonValue>& V : *LogValues)
+            {
+                Logs.Add(V.IsValid() ? V->AsString() : FString());
+            }
+        }
+
+        if (TSharedPtr<SGameDepotOperationDialog> Dialog = OperationDialog.Pin())
+        {
+            Dialog->SetProgress(Phase, Message, static_cast<int32>(CurrentNumber), static_cast<int32>(TotalNumber), static_cast<int32>(PercentNumber));
+            Dialog->SetLogs(Logs);
+        }
+
+        if (Status == TEXT("succeeded"))
+        {
+            if (TSharedPtr<SGameDepotOperationDialog> Dialog = OperationDialog.Pin())
+            {
+                Dialog->SetSucceeded(FriendlyName + TEXT(" completed."));
+            }
+            SetToolbarState(EGameDepotToolbarState::OK, FriendlyName + TEXT(" completed."));
+            Notify(ToolbarStateMessage);
+            RefreshContentBrowserAfterDepotChange();
+            RefreshData();
+            if (FriendlyName.StartsWith(TEXT("Resolve")))
+            {
+                ShowConflictDialog();
+            }
+        }
+        else if (Status == TEXT("failed"))
+        {
+            const FString ErrorText = Error.IsEmpty() ? Text : Error;
+            if (TSharedPtr<SGameDepotOperationDialog> Dialog = OperationDialog.Pin())
+            {
+                Dialog->SetFailed(ErrorText);
+            }
+            SetToolbarState(EGameDepotToolbarState::Error, ErrorText);
+            Notify(FriendlyName + TEXT(" needs attention."));
+            ShowConflictDialog();
+        }
+        else
+        {
+            FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateLambda([this, TaskID, FriendlyName](float) { PollGameDepotOperation(TaskID, FriendlyName); return false; }), 0.35f);
+        }
+    });
+}
+
+void FGameDepotUEModule::ShowConflictDialog()
+{
+    RequestJSON(TEXT("GET"), TEXT("/api/ue/v1/conflicts"), TEXT(""), [this](bool bOK, const FString& Text)
+    {
+        if (!bOK)
+        {
+            return;
+        }
+        ShowConflictDialogFromJSON(Text);
+    });
+}
+
+void FGameDepotUEModule::ShowConflictDialogFromJSON(const FString& JsonText)
+{
+    TSharedPtr<FJsonObject> Root;
+    if (!ParseJsonObject(JsonText, Root) || !Root.IsValid())
+    {
+        return;
+    }
+    bool bActive = false;
+    Root->TryGetBoolField(TEXT("active"), bActive);
+    const TArray<TSharedPtr<FJsonValue>>* ConflictValues = nullptr;
+    if (!Root->TryGetArrayField(TEXT("conflicts"), ConflictValues) || !ConflictValues || ConflictValues->Num() == 0)
+    {
+        return;
+    }
+    if (!bActive)
+    {
+        return;
+    }
+
+    TArray<FGameDepotConflictItemPtr> Items;
+    for (const TSharedPtr<FJsonValue>& V : *ConflictValues)
+    {
+        const TSharedPtr<FJsonObject> Obj = V.IsValid() ? V->AsObject() : nullptr;
+        if (!Obj.IsValid())
+        {
+            continue;
+        }
+        FGameDepotConflictItemPtr Item = MakeShared<FGameDepotConflictItem>();
+        Obj->TryGetStringField(TEXT("path"), Item->Path);
+        Obj->TryGetStringField(TEXT("kind"), Item->Kind);
+        Obj->TryGetStringField(TEXT("base_oid"), Item->BaseOID);
+        Obj->TryGetStringField(TEXT("local_oid"), Item->LocalOID);
+        Obj->TryGetStringField(TEXT("remote_oid"), Item->RemoteOID);
+        if (!Item->Path.IsEmpty())
+        {
+            Items.Add(Item);
+        }
+    }
+    if (Items.Num() == 0)
+    {
+        return;
+    }
+
+    TSharedRef<SWindow> Window = SNew(SWindow)
+        .Title(LOCTEXT("ConflictWindowTitle", "GameDepot Conflicts"))
+        .ClientSize(FVector2D(920.0f, 520.0f))
+        .SupportsMaximize(false)
+        .SupportsMinimize(false);
+    Window->SetContent(SNew(SGameDepotConflictDialog)
+        .Conflicts(Items)
+        .OnResolveRequested(FGameDepotResolveConflictAction::CreateRaw(this, &FGameDepotUEModule::ResolveConflict)));
+    FSlateApplication::Get().AddWindow(Window);
+}
+
+void FGameDepotUEModule::ResolveConflict(const FString& DepotPath, const FString& Decision)
+{
+    if (!EnsureDaemon()) return;
+    const FString Body = FString::Printf(TEXT("{\"path\":%s,\"decision\":%s,\"async\":true}"), *QuoteJSON(DepotPath), *QuoteJSON(Decision));
+    StartGameDepotOperation(Decision == TEXT("remote") ? TEXT("Resolve Remote") : TEXT("Resolve Local"), TEXT("/api/ue/v1/conflicts/resolve"), Body);
+}
+
+bool FGameDepotUEModule::PromptPublishMessage(FString& OutMessage) const
+{
+    bool bAccepted = false;
+    TSharedPtr<SEditableTextBox> TextBox;
+    TSharedRef<SWindow> Window = SNew(SWindow)
+        .Title(LOCTEXT("PublishMessageTitle", "GameDepot Publish"))
+        .ClientSize(FVector2D(520.0f, 150.0f))
+        .SupportsMaximize(false)
+        .SupportsMinimize(false);
+
+    Window->SetContent(
+        SNew(SBorder)
+        .BorderImage(FAppStyle::GetBrush("Brushes.Panel"))
+        .Padding(12.0f)
+        [
+            SNew(SVerticalBox)
+            + SVerticalBox::Slot().AutoHeight().Padding(0.0f, 0.0f, 0.0f, 8.0f)
+            [
+                SNew(STextBlock).Text(LOCTEXT("PublishMessagePrompt", "Publish message"))
+            ]
+            + SVerticalBox::Slot().AutoHeight().Padding(0.0f, 0.0f, 0.0f, 12.0f)
+            [
+                SAssignNew(TextBox, SEditableTextBox)
+                .Text(FText::FromString(TEXT("Publish from Unreal Editor")))
+                .SelectAllTextWhenFocused(true)
+            ]
+            + SVerticalBox::Slot().AutoHeight().HAlign(HAlign_Right)
+            [
+                SNew(SHorizontalBox)
+                + SHorizontalBox::Slot().AutoWidth().Padding(0.0f, 0.0f, 8.0f, 0.0f)
+                [
+                    SNew(SButton)
+                    .Text(LOCTEXT("CancelPublish", "Cancel"))
+                    .OnClicked_Lambda([&Window]() { Window->RequestDestroyWindow(); return FReply::Handled(); })
+                ]
+                + SHorizontalBox::Slot().AutoWidth()
+                [
+                    SNew(SButton)
+                    .Text(LOCTEXT("StartPublish", "Publish"))
+                    .OnClicked_Lambda([&bAccepted, &Window]() { bAccepted = true; Window->RequestDestroyWindow(); return FReply::Handled(); })
+                ]
+            ]
+        ]);
+
+    FSlateApplication::Get().AddModalWindow(Window, TSharedPtr<SWindow>());
+    OutMessage = TextBox.IsValid() ? TextBox->GetText().ToString().TrimStartAndEnd() : FString();
+    return bAccepted && !OutMessage.IsEmpty();
+}
+
+bool FGameDepotUEModule::SaveDirtyContentPackages(const FString& Reason) const
+{
+    const EAppReturnType::Type Choice = FMessageDialog::Open(EAppMsgType::YesNoCancel, FText::FromString(FString::Printf(TEXT("GameDepot %s needs saved Content files on disk.\n\nSave dirty Content packages now?"), *Reason)));
+    if (Choice != EAppReturnType::Yes)
+    {
+        return false;
+    }
+    return FEditorFileUtils::SaveDirtyPackages(true, false, true);
+}
+
+void FGameDepotUEModule::RefreshContentBrowserAfterDepotChange()
+{
+    if (!FModuleManager::Get().IsModuleLoaded(TEXT("AssetRegistry")))
+    {
+        return;
+    }
+    FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
+    TArray<FString> PathsToScan;
+    PathsToScan.Add(TEXT("/Game"));
+    AssetRegistryModule.Get().ScanPathsSynchronous(PathsToScan, true);
+}
+
 void FGameDepotUEModule::PullConfigFromDaemon(bool bRefreshPanel)
 {
     if (bMockMode || !EnsureDaemon()) return;
@@ -850,7 +1199,7 @@ void FGameDepotUEModule::PushConfigToDaemon(const FGameDepotConfigSnapshot& Snap
             const FString RuleBody = FString::Printf(TEXT("{\"pattern\":%s,\"mode\":%s,\"scope\":%s}"), *QuoteJSON(Rule.Pattern), *QuoteJSON(Rule.Mode), *QuoteJSON(Rule.Scope.IsEmpty() ? TEXT("glob") : Rule.Scope));
             RequestJSON(TEXT("POST"), TEXT("/api/ue/v1/rules/upsert"), RuleBody, [](bool, const FString&) {});
         }
-        SetToolbarState(EGameDepotToolbarState::PendingUpdate, TEXT("Config saved to daemon. Sync or submit is pending."));
+        SetToolbarState(EGameDepotToolbarState::PendingUpdate, TEXT("Config saved to daemon. Update or publish is pending."));
         Notify(TEXT("GameDepot config saved."));
         PullConfigFromDaemon(true);
         RefreshData();

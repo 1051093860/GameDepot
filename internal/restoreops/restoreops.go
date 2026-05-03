@@ -2,6 +2,7 @@ package restoreops
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"github.com/1051093860/gamedepot/internal/blob"
 	gdgit "github.com/1051093860/gamedepot/internal/git"
 	"github.com/1051093860/gamedepot/internal/manifest"
+	gdrefs "github.com/1051093860/gamedepot/internal/refs"
 	"github.com/1051093860/gamedepot/internal/workspace"
 )
 
@@ -25,34 +27,48 @@ func RestoreVersion(ctx context.Context, a *app.App, relPath string, commit stri
 	}
 	g := gdgit.New(a.Root)
 	raw, err := g.ShowFileBytes(commit, a.Config.ManifestPath)
-	if err != nil {
-		// legacy Git-only version without manifest
-		data, gitErr := g.ShowFileBytes(commit, relPath)
-		if gitErr != nil {
-			return err
+	if err == nil {
+		if m, manifestErr := manifest.LoadBytes(raw); manifestErr == nil {
+			e, ok := m.Get(relPath)
+			if !ok || e.Deleted {
+				return fmt.Errorf("%s is not present in commit %s", relPath, commit)
+			}
+			if e.Storage == manifest.StorageBlob {
+				return restoreBlob(ctx, a, relPath, e.SHA256, force)
+			}
+			data, err := g.ShowFileBytes(commit, relPath)
+			if err != nil {
+				return err
+			}
+			return writeWorkingFile(a.Root, relPath, data, force)
 		}
-		return writeWorkingFile(a.Root, relPath, data, force)
 	}
-	m, err := manifest.LoadBytes(raw)
-	if err != nil {
-		return err
+
+	// Pointer-refs projects store one Git-tracked .gdref per Content asset.
+	if refRel, refErr := gdrefs.RefPathFor(relPath); refErr == nil {
+		if refRaw, refReadErr := g.ShowFileBytes(commit, refRel); refReadErr == nil {
+			var r gdrefs.AssetRef
+			if err := json.Unmarshal(refRaw, &r); err != nil {
+				return err
+			}
+			sha := gdrefs.SHAFromOID(r.OID)
+			if sha == "" {
+				return fmt.Errorf("%s has no blob oid in commit %s", refRel, commit)
+			}
+			return restoreBlob(ctx, a, relPath, sha, force)
+		}
 	}
-	e, ok := m.Get(relPath)
-	if !ok || e.Deleted {
-		return fmt.Errorf("%s is not present in commit %s", relPath, commit)
-	}
-	if e.Storage == manifest.StorageBlob {
-		return restoreBlob(ctx, a, relPath, e.SHA256, force)
-	}
-	data, err := g.ShowFileBytes(commit, relPath)
-	if err != nil {
+
+	// Legacy Git-only version without manifest/pointer ref.
+	data, gitErr := g.ShowFileBytes(commit, relPath)
+	if gitErr != nil {
 		return err
 	}
 	return writeWorkingFile(a.Root, relPath, data, force)
 }
 
 func RevertAssets(ctx context.Context, a *app.App, paths []string, force bool) error {
-	m, err := manifest.Load(a.ManifestPath)
+	m, err := loadCurrentManifest(a)
 	if err != nil {
 		return err
 	}
@@ -83,6 +99,22 @@ func RevertAssets(ctx context.Context, a *app.App, paths []string, force bool) e
 		}
 	}
 	return nil
+}
+
+func loadCurrentManifest(a *app.App) (manifest.Manifest, error) {
+	if info, err := os.Stat(a.ManifestPath); err == nil && info.IsDir() {
+		m := manifest.New(a.Config.ProjectID)
+		loaded, err := gdrefs.NewStore(a.Root).LoadAll()
+		if err != nil {
+			return manifest.Manifest{}, err
+		}
+		for _, p := range gdrefs.SortedPaths(loaded) {
+			r := loaded[p]
+			m.Upsert(manifest.Entry{Path: p, Storage: manifest.StorageBlob, SHA256: gdrefs.SHAFromOID(r.OID), Size: r.Size, Kind: r.Kind})
+		}
+		return m, nil
+	}
+	return manifest.Load(a.ManifestPath)
 }
 
 func restoreBlob(ctx context.Context, a *app.App, rel, sha string, force bool) error {

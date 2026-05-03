@@ -17,10 +17,9 @@ func TestClassifyRel(t *testing.T) {
 		mode rules.Mode
 		kind string
 	}{
-		{"Content/Maps/Main.umap", rules.ModeBlob, "unreal_map"},
+		{"Content/Maps/Main.umap", rules.ModeBlob, "content_asset"},
 		{"Config/DefaultGame.ini", rules.ModeGit, "git_native"},
 		{"Source/Game/GameMode.cpp", rules.ModeGit, "git_native"},
-		{"Saved/Logs/Game.log", rules.ModeIgnore, "unreal_generated"},
 		{"Random/file.tmp", rules.ModeGit, "git_native"},
 	}
 

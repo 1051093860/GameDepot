@@ -33,25 +33,14 @@ private:
     TSharedPtr<SListView<FGameDepotAssetRowPtr>> ListView;
     TSharedPtr<SSearchBox> SearchBox;
     FString SearchText;
-    FString StorageFilter;
-    FString SyncFilter;
     FSimpleDelegate OnRefreshRequested;
-    FGameDepotRulePathsAction OnRuleRequested;
     FGameDepotPathAction OnHistoryRequested;
     FGameDepotPathsAction OnRevertRequested;
-    FGameDepotPathAction OnHistoryRestored;
-
-    TArray<TSharedPtr<FString>> StorageOptions;
-    TArray<TSharedPtr<FString>> SyncOptions;
-    TSharedPtr<FString> SelectedStorageOption;
-    TSharedPtr<FString> SelectedSyncOption;
 
     TSharedRef<ITableRow> MakeRowWidget(FGameDepotAssetRowPtr Row, const TSharedRef<STableViewBase>& OwnerTable);
     TSharedRef<SWidget> BuildTopBar();
     TSharedRef<SWidget> BuildSummaryBar();
-    TSharedRef<SWidget> BuildFilterCombo(TArray<TSharedPtr<FString>>& Options, bool bStorageFilterCombo);
-    TSharedRef<SWidget> BuildRuleButtons();
-    TSharedRef<SWidget> BuildLegend() const;
+    TSharedRef<SWidget> BuildActionBar();
     TSharedRef<SWidget> BuildDetailsPanel() const;
 
     void ApplyFilters();
@@ -62,5 +51,4 @@ private:
     FString GetFirstSelectedDepotPath() const;
     void ShowHistoryForSelected();
     void RevertSelectedUncommitted();
-    void RequestRuleForSelected(const FString& Mode);
 };

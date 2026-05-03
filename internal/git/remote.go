@@ -70,10 +70,16 @@ func (g Git) LsRemote(name string) error {
 
 func (g Git) CurrentBranch() (string, error) {
 	out, err := g.Run("rev-parse", "--abbrev-ref", "HEAD")
-	if err != nil {
-		return "", err
+	if err == nil {
+		return strings.TrimSpace(out), nil
 	}
-	return strings.TrimSpace(out), nil
+	// In an unborn repository (no commits yet), rev-parse can fail because HEAD
+	// has no object. symbolic-ref still knows the intended branch name.
+	out, err2 := g.Run("symbolic-ref", "--short", "HEAD")
+	if err2 == nil {
+		return strings.TrimSpace(out), nil
+	}
+	return "", err
 }
 
 func (g Git) HasAnyRemote() bool {

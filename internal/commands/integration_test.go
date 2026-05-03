@@ -46,14 +46,21 @@ func TestSubmitVerifySyncProtectsDirtyFile(t *testing.T) {
 	}
 
 	writeFile(t, target, "dirty local edit")
-	if err := Sync(ctx, root, false); err == nil || !strings.Contains(err.Error(), "refusing to overwrite") {
-		t.Fatalf("expected overwrite protection error, got %v", err)
+	if err := Sync(ctx, root, false); err != nil {
+		t.Fatalf("expected normal sync/update to keep local-only changes, got %v", err)
+	}
+	data, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "dirty local edit" {
+		t.Fatalf("normal sync should preserve local-only edit, got %q", string(data))
 	}
 
 	if err := Sync(ctx, root, true); err != nil {
 		t.Fatal(err)
 	}
-	data, err := os.ReadFile(target)
+	data, err = os.ReadFile(target)
 	if err != nil {
 		t.Fatal(err)
 	}

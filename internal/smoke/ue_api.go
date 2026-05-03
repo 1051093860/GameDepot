@@ -164,6 +164,8 @@ func (r *ueAPIRunner) run(ctx context.Context) error {
 
 	r.section("task API")
 	r.httpTask(ctx, "project verify task", "/api/ue/v1/project/verify", map[string]any{"local": true, "remote": true})
+	r.httpTask(ctx, "project update async task", "/api/ue/v1/update", map[string]any{"mode": "normal", "async": true})
+	r.httpTask(ctx, "project publish task", "/api/ue/v1/publish", map[string]any{"message": "ue api no-op publish", "async": true, "verify_after_submit": false})
 	r.httpTask(ctx, "project sync task", "/api/ue/v1/project/sync", map[string]any{"force": true, "pull_git": true})
 	r.httpTask(ctx, "project submit task", "/api/ue/v1/project/submit", map[string]any{"message": "ue api no-op submit", "push": false, "verify_after_submit": false})
 	r.httpTask(ctx, "restore task", "/api/ue/v1/assets/restore", map[string]any{"paths": []string{"Content/Maps/Main.umap"}, "force": true})

@@ -21,13 +21,13 @@ func Push(ctx context.Context, start string) error {
 		fmt.Println("No git remote configured; using local version management only.")
 		return nil
 	}
-	branch, _ := g.CurrentBranch()
+	branch, remote := currentBranchAndRemote(g)
 	if branch == "" || branch == "HEAD" {
 		_, err = g.Run("push")
 	} else {
-		_, err = g.Run("push", "-u", "origin", branch)
+		_, err = g.Run("push", "-u", remote, branch)
 	}
-	if err != nil && strings.Contains(err.Error(), "origin") {
+	if err != nil && strings.Contains(err.Error(), remote) {
 		_, err = g.Run("push")
 	}
 	return err

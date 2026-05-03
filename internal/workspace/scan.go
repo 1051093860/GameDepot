@@ -164,6 +164,7 @@ func ShouldSkipDir(rel string, cfg config.Config) bool {
 		strings.HasPrefix(rel, ".gamedepot/tmp") ||
 		strings.HasPrefix(rel, ".gamedepot/logs") ||
 		strings.HasPrefix(rel, ".gamedepot/runtime") ||
+		strings.HasPrefix(rel, ".gamedepot/state") ||
 		strings.HasPrefix(rel, ".gamedepot/remote_blobs") {
 		return true
 	}

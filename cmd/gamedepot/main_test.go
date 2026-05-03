@@ -1,6 +1,10 @@
 package main
 
-import "testing"
+import (
+	"os"
+	"strings"
+	"testing"
+)
 
 func TestParseConfigAddOSSArgsSupportsFlagsAfterName(t *testing.T) {
 	name, region, bucket, endpoint, internal, accelerate, err := parseConfigAddOSSArgs([]string{
@@ -44,5 +48,29 @@ func TestParseConfigSetCredentialsSupportsFlagsAfterName(t *testing.T) {
 	}
 	if name != "aliyun-oss" || id != "id" || secret != "secret" {
 		t.Fatalf("unexpected result: name=%q id=%q secret=%q", name, id, secret)
+	}
+}
+
+func TestOldTopLevelCommandsAreRemoved(t *testing.T) {
+	oldArgs := os.Args
+	defer func() { os.Args = oldArgs }()
+
+	for _, cmd := range []string{"pull", "sync", "submit", "push", "rules"} {
+		os.Args = []string{"gamedepot", cmd}
+		err := run()
+		if err == nil {
+			t.Fatalf("%s unexpectedly succeeded", cmd)
+		}
+		if !strings.Contains(err.Error(), "removed") {
+			t.Fatalf("%s error should mention removal, got %v", cmd, err)
+		}
+	}
+}
+
+func TestReorderFlagsAllowsFlagsAfterPositionals(t *testing.T) {
+	got := reorderFlags([]string{".", "--remote", "https://example.com/repo.git", "--branch", "main", "--no-plugin"}, map[string]bool{"no-plugin": true})
+	want := []string{"--remote", "https://example.com/repo.git", "--branch", "main", "--no-plugin", "."}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("reordered = %#v, want %#v", got, want)
 	}
 }

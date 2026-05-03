@@ -544,6 +544,29 @@ EGameDepotSeverity GDSeverityFromString(const FString& Severity, EGameDepotSyncS
     return EGameDepotSeverity::Warning;
 }
 
+
+EGameDepotSyncState GDSyncFromChangeState(const FString& State)
+{
+    const FString S = State.ToLower();
+    if (S == TEXT("conflict")) return EGameDepotSyncState::RoutingConflict;
+    if (S == TEXT("local_added")) return EGameDepotSyncState::NewFile;
+    if (S == TEXT("local_deleted")) return EGameDepotSyncState::MissingRemote;
+    if (S == TEXT("remote_changed")) return EGameDepotSyncState::MissingLocal;
+    if (S == TEXT("local_modified")) return EGameDepotSyncState::Modified;
+    return EGameDepotSyncState::Modified;
+}
+
+FString HumanChangeState(const FString& State)
+{
+    const FString S = State.ToLower();
+    if (S == TEXT("conflict")) return TEXT("Conflict");
+    if (S == TEXT("local_added")) return TEXT("Added");
+    if (S == TEXT("local_deleted")) return TEXT("Deleted");
+    if (S == TEXT("remote_changed")) return TEXT("Remote");
+    if (S == TEXT("local_modified")) return TEXT("Modified");
+    return State.IsEmpty() ? TEXT("Changed") : State;
+}
+
 FDateTime ParseDaemonDate(const FString& Text)
 {
     FDateTime Date;
@@ -563,10 +586,18 @@ bool FGameDepotMockStatusProvider::ReplaceRowsFromDaemonJSON(const FString& Json
         return false;
     }
     const TArray<TSharedPtr<FJsonValue>>* Assets = nullptr;
-    if (!Root->TryGetArrayField(TEXT("assets"), Assets) || Assets == nullptr)
+    bool bChangesPayload = false;
+    if (!Root->TryGetArrayField(TEXT("items"), Assets) || Assets == nullptr)
     {
-        OutError = TEXT("/assets/status response has no assets array");
-        return false;
+        if (!Root->TryGetArrayField(TEXT("assets"), Assets) || Assets == nullptr)
+        {
+            OutError = TEXT("response has no items/assets array");
+            return false;
+        }
+    }
+    else
+    {
+        bChangesPayload = true;
     }
 
     Rows.Reset();
@@ -589,9 +620,22 @@ bool FGameDepotMockStatusProvider::ReplaceRowsFromDaemonJSON(const FString& Json
         Row->DesiredRule = DesiredMode.IsEmpty() ? TEXT("-") : DesiredMode;
         Row->bHistoryOnly = false;
         Obj->TryGetBoolField(TEXT("history_only"), Row->bHistoryOnly);
-        Row->Storage = GDStorageFromStrings(ManifestStorage, DesiredMode, Status, Row->bHistoryOnly);
-        Row->Sync = GDSyncFromStatus(Status, DesiredMode);
-        Row->Severity = GDSeverityFromString(Severity, Row->Sync);
+        Obj->TryGetStringField(TEXT("state"), Row->ChangeState);
+        Obj->TryGetStringField(TEXT("kind"), Row->Kind);
+        if (bChangesPayload)
+        {
+            Row->Storage = EGameDepotStorage::OSS;
+            Row->Sync = GDSyncFromChangeState(Row->ChangeState);
+            Row->Severity = (Row->Sync == EGameDepotSyncState::RoutingConflict) ? EGameDepotSeverity::Error : EGameDepotSeverity::Warning;
+            Row->DesiredRule = HumanChangeState(Row->ChangeState);
+            Row->RemoteState = Row->Kind;
+        }
+        else
+        {
+            Row->Storage = GDStorageFromStrings(ManifestStorage, DesiredMode, Status, Row->bHistoryOnly);
+            Row->Sync = GDSyncFromStatus(Status, DesiredMode);
+            Row->Severity = GDSeverityFromString(Severity, Row->Sync);
+        }
         Obj->TryGetStringField(TEXT("message"), Row->Message);
         Obj->TryGetBoolField(TEXT("git_tracked"), Row->bGitTracked);
         const TSharedPtr<FJsonObject>* CurrentObj = nullptr;
@@ -614,10 +658,21 @@ bool FGameDepotMockStatusProvider::ReplaceRowsFromDaemonJSON(const FString& Json
                 Row->bRemoteExists = true;
             }
         }
+        if (Row->ShortHash.IsEmpty())
+        {
+            Obj->TryGetStringField(TEXT("local_oid"), Row->ShortHash);
+            if (Row->ShortHash.IsEmpty()) Obj->TryGetStringField(TEXT("remote_oid"), Row->ShortHash);
+            if (Row->ShortHash.IsEmpty()) Obj->TryGetStringField(TEXT("base_oid"), Row->ShortHash);
+            Row->ShortHash.RemoveFromStart(TEXT("sha256:"));
+            Row->ShortHash = Row->ShortHash.Left(8);
+        }
         if (Row->ShortHash.IsEmpty()) Row->ShortHash = FString::Printf(TEXT("%08x"), static_cast<uint32>(StableHash(Row->DepotPath))).Left(8);
-        Row->RemoteState = Row->Storage == EGameDepotStorage::OSS || Row->Storage == EGameDepotStorage::NewToOSS
-            ? (Row->bLocalBlobCached ? TEXT("Cached") : (!Row->bRemoteChecked ? TEXT("Unknown") : (Row->bRemoteExists ? TEXT("Exists") : TEXT("Missing/Pending"))))
-            : TEXT("N/A");
+        if (!bChangesPayload)
+        {
+            Row->RemoteState = Row->Storage == EGameDepotStorage::OSS || Row->Storage == EGameDepotStorage::NewToOSS
+                ? (Row->bLocalBlobCached ? TEXT("Cached") : (!Row->bRemoteChecked ? TEXT("Unknown") : (Row->bRemoteExists ? TEXT("Exists") : TEXT("Missing/Pending"))))
+                : TEXT("N/A");
+        }
         UpsertRow(Row);
     }
     return true;

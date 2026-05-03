@@ -7,7 +7,6 @@ import (
 	"strings"
 
 	"github.com/1051093860/gamedepot/internal/config"
-	"github.com/1051093860/gamedepot/internal/manifest"
 )
 
 func Init(root string, projectID string) error {
@@ -43,9 +42,13 @@ func InitUEExisting(root string, projectID string) error {
 		if err := appendGitignore(absRoot); err != nil {
 			return err
 		}
+		if err := appendGitattributes(absRoot); err != nil {
+			return err
+		}
 		fmt.Println("GameDepot already initialized")
 		fmt.Println("  config:", filepath.ToSlash(config.ConfigRelPath))
 		fmt.Println("  gitignore: ensured UE5/GameDepot rules")
+		fmt.Println("  gitattributes: ensured pointer refs LF normalization")
 		return nil
 	}
 
@@ -56,7 +59,8 @@ func InitUEExisting(root string, projectID string) error {
 		".gamedepot/logs",
 		".gamedepot/runtime",
 		".gamedepot/remote_blobs",
-		"depot/manifests",
+		"depot/refs",
+		".gamedepot/state",
 	}
 	for _, d := range dirs {
 		if err := os.MkdirAll(filepath.Join(absRoot, d), 0o755); err != nil {
@@ -66,17 +70,16 @@ func InitUEExisting(root string, projectID string) error {
 	if err := config.Save(absRoot, cfg); err != nil {
 		return err
 	}
-	m := manifest.New(cfg.ProjectID)
-	if err := manifest.Save(filepath.Join(absRoot, cfg.ManifestPath), m); err != nil {
+	if err := appendGitignore(absRoot); err != nil {
 		return err
 	}
-	if err := appendGitignore(absRoot); err != nil {
+	if err := appendGitattributes(absRoot); err != nil {
 		return err
 	}
 	fmt.Println("GameDepot initialized for Unreal project")
 	fmt.Println("  project: ", cfg.ProjectID)
 	fmt.Println("  config:  ", filepath.ToSlash(config.ConfigRelPath))
-	fmt.Println("  manifest:", filepath.ToSlash(cfg.ManifestPath))
+	fmt.Println("  refs:    depot/refs")
 	return nil
 }
 
@@ -91,6 +94,7 @@ func appendGitignore(root string) error {
 .gamedepot/tmp/
 .gamedepot/logs/
 .gamedepot/runtime/
+.gamedepot/state/
 .gamedepot/remote_blobs/
 
 # Unreal generated / local-only folders
@@ -120,33 +124,50 @@ Saved/
 *.temp
 *.pid
 
-# GameDepot blob-routed Content binaries
-# These files are restored from depot/manifests/*.gdmanifest.json + object storage.
-Content/**/*.uasset
-Content/**/*.umap
-Content/**/*.ubulk
-Content/**/*.uexp
-Content/**/*.uptnl
-
-# Optional large imported media/sources under Content, also routed by GameDepot rules.
-Content/**/*.wav
-Content/**/*.ogg
-Content/**/*.mp3
-Content/**/*.flac
-Content/**/*.mp4
-Content/**/*.mov
-Content/**/*.avi
-Content/**/*.png
-Content/**/*.jpg
-Content/**/*.jpeg
-Content/**/*.tga
-Content/**/*.exr
-Content/**/*.hdr
-Content/**/*.fbx
-Content/**/*.obj
-Content/**/*.gltf
-Content/**/*.glb
+# GameDepot manages all project Content through pointer refs.
+# Real Content files are materialized by gamedepot update from depot/refs + object storage.
+Content/**
 # END GameDepot UE5
+`
+	oldBytes, _ := os.ReadFile(path)
+	old := string(oldBytes)
+	if strings.Contains(old, begin) && strings.Contains(old, end) {
+		start := strings.Index(old, begin)
+		finish := strings.Index(old[start:], end)
+		if finish >= 0 {
+			finish = start + finish + len(end)
+			updated := strings.TrimRight(old[:start], "\r\n") + "\n" + strings.Trim(block, "\n") + "\n" + strings.TrimLeft(old[finish:], "\r\n")
+			return os.WriteFile(path, []byte(updated), 0o644)
+		}
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	if strings.TrimSpace(old) != "" && !strings.HasSuffix(old, "\n") {
+		if _, err := f.WriteString("\n"); err != nil {
+			return err
+		}
+	}
+	_, err = f.WriteString(block)
+	return err
+}
+
+func appendGitattributes(root string) error {
+	path := filepath.Join(root, ".gitattributes")
+	const begin = "# BEGIN GameDepot"
+	const end = "# END GameDepot"
+	block := `
+# BEGIN GameDepot
+# Pointer refs and GameDepot metadata must be stable across Windows/macOS/Linux.
+# Without this, Windows core.autocrlf can make .gdref files look locally modified
+# after clone, which blocks update/pull even when the user only edited Content.
+/depot/refs/**/*.gdref text eol=lf
+/.gamedepot/config.yaml text eol=lf
+/.gitignore text eol=lf
+/.gitattributes text eol=lf
+# END GameDepot
 `
 	oldBytes, _ := os.ReadFile(path)
 	old := string(oldBytes)

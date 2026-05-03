@@ -24,7 +24,6 @@ import (
 	"github.com/1051093860/gamedepot/internal/commands"
 	"github.com/1051093860/gamedepot/internal/config"
 	gdgit "github.com/1051093860/gamedepot/internal/git"
-	"github.com/1051093860/gamedepot/internal/historyindex"
 	"github.com/1051093860/gamedepot/internal/manifest"
 	"github.com/1051093860/gamedepot/internal/restoreops"
 	"github.com/1051093860/gamedepot/internal/rules"
@@ -147,11 +146,16 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/ue/v1/tasks/", s.handleTaskByID)
 	mux.HandleFunc("/api/ue/v1/sync", s.requirePost(s.handleProjectSync))
 	mux.HandleFunc("/api/ue/v1/submit", s.requirePost(s.handleProjectSubmit))
+	mux.HandleFunc("/api/ue/v1/publish", s.requirePost(s.handleProjectSubmit))
 	mux.HandleFunc("/api/ue/v1/project/sync", s.requirePost(s.handleProjectSync))
 	mux.HandleFunc("/api/ue/v1/project/submit", s.requirePost(s.handleProjectSubmit))
 	mux.HandleFunc("/api/ue/v1/project/verify", s.requirePost(s.handleProjectVerify))
+	mux.HandleFunc("/api/ue/v1/update", s.requirePost(s.handleUpdate))
+	mux.HandleFunc("/api/ue/v1/conflicts", s.handleConflicts)
+	mux.HandleFunc("/api/ue/v1/conflicts/resolve", s.requirePost(s.handleConflictsResolve))
 	mux.HandleFunc("/api/ue/v1/project/gc-preview", s.requirePost(s.handleGCPreview))
 	mux.HandleFunc("/api/ue/v1/assets/status", s.handleAssetStatus)
+	mux.HandleFunc("/api/ue/v1/assets/changes", s.requirePost(s.handleAssetChanges))
 	mux.HandleFunc("/api/ue/v1/assets/restore", s.requirePost(s.handleAssetsRestore))
 	mux.HandleFunc("/api/ue/v1/assets/revert", s.requirePost(s.handleAssetsRevert))
 	mux.HandleFunc("/api/ue/v1/assets/repair-current-blob", s.requirePost(s.handleAssetsRepair))
@@ -945,6 +949,19 @@ func (s *Server) handleTaskByID(w http.ResponseWriter, r *http.Request) {
 	writeOK(w, map[string]any{"task": task})
 }
 
+func taskProgressFromCommand(t *Task) commands.ProgressFunc {
+	return func(ev commands.ProgressEvent) {
+		msg := ev.Message
+		if msg == "" {
+			msg = ev.Path
+		}
+		if msg == "" {
+			msg = ev.Phase
+		}
+		t.Progress(ev.Phase, msg, ev.Current, ev.Total)
+	}
+}
+
 func (s *Server) handleProjectSync(w http.ResponseWriter, r *http.Request) {
 	var req syncRequest
 	_ = json.NewDecoder(r.Body).Decode(&req)
@@ -977,18 +994,18 @@ func (s *Server) handleProjectSubmit(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "message_required", "submit message is required", nil)
 		return
 	}
-	task, _ := s.tasks.Start(r.Context(), "submit_project", map[string]any{"message": req.Message, "allow_unmanaged": req.AllowUnmanaged}, func(ctx context.Context, t *Task) error {
-		t.Progress("submit", "Uploading blobs and committing", 1, 4)
-		if err := commands.SubmitWithOptions(ctx, s.root, req.Message, commands.SubmitOptions{AllowUnmanaged: req.AllowUnmanaged}); err != nil {
+	task, _ := s.tasks.Start(r.Context(), "publish_project", map[string]any{"message": req.Message, "allow_unmanaged": req.AllowUnmanaged}, func(ctx context.Context, t *Task) error {
+		t.Progress("publish", "Preparing publish", 0, 0)
+		if err := commands.Publish(ctx, s.root, req.Message, commands.PublishOptions{Progress: taskProgressFromCommand(t)}); err != nil {
 			return err
 		}
 		if req.VerifyAfterSubmit {
-			t.Progress("verify", "Verifying after submit", 3, 4)
+			t.Progress("verify", "Verifying after publish", 0, 0)
 			if err := commands.VerifyWithOptions(ctx, s.root, commands.VerifyOptions{RemoteOnly: true}); err != nil {
 				return err
 			}
 		}
-		t.Progress("complete", "Submit completed", 4, 4)
+		t.Progress("complete", "Publish completed", 1, 1)
 		return nil
 	})
 	writeOK(w, map[string]any{"task_id": task.ID})
@@ -1000,6 +1017,94 @@ type submitRequest struct {
 	Push              bool     `json:"push"`
 	VerifyAfterSubmit bool     `json:"verify_after_submit"`
 	AllowUnmanaged    bool     `json:"allow_unmanaged"`
+}
+
+func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Mode   string `json:"mode"`
+		Force  bool   `json:"force"`
+		Strict bool   `json:"strict"`
+		Async  bool   `json:"async"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&req)
+	mode := strings.ToLower(strings.TrimSpace(req.Mode))
+	opts := commands.UpdateOptions{Force: req.Force, Strict: req.Strict}
+	switch mode {
+	case "force":
+		opts.Force = true
+	case "strict":
+		opts.Strict = true
+	case "", "normal", "safe":
+	default:
+		writeError(w, http.StatusBadRequest, "bad_update_mode", "mode must be normal, strict, or force", nil)
+		return
+	}
+	if req.Async {
+		task, _ := s.tasks.Start(r.Context(), "update_project", map[string]any{"mode": mode, "force": opts.Force, "strict": opts.Strict}, func(ctx context.Context, t *Task) error {
+			t.Progress("update", "Preparing update", 0, 0)
+			runOpts := opts
+			runOpts.Progress = taskProgressFromCommand(t)
+			if err := commands.Update(ctx, s.root, runOpts); err != nil {
+				return err
+			}
+			t.Progress("complete", "Update completed", 1, 1)
+			return nil
+		})
+		writeOK(w, map[string]any{"task_id": task.ID})
+		return
+	}
+	if err := commands.Update(r.Context(), s.root, opts); err != nil {
+		st, _ := commands.GetConflicts(r.Context(), s.root)
+		if st.Active && len(st.Conflicts) > 0 {
+			writeOK(w, map[string]any{"ok": false, "status": "needs_resolution", "error": err.Error(), "conflicts": st.Conflicts, "state": st})
+			return
+		}
+		writeErr(w, err)
+		return
+	}
+	writeOK(w, map[string]any{"ok": true, "status": "updated"})
+}
+
+func (s *Server) handleConflicts(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "GET required", nil)
+		return
+	}
+	st, err := commands.GetConflicts(r.Context(), s.root)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeOK(w, map[string]any{"active": st.Active, "type": st.Type, "conflicts": st.Conflicts, "state": st})
+}
+
+func (s *Server) handleConflictsResolve(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Path     string `json:"path"`
+		Decision string `json:"decision"`
+		Async    bool   `json:"async"`
+	}
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if req.Async {
+		task, _ := s.tasks.Start(r.Context(), "resolve_conflict", map[string]any{"path": req.Path, "decision": req.Decision}, func(ctx context.Context, t *Task) error {
+			t.Progress("resolve", "Resolving "+req.Path, 0, 0)
+			if err := commands.ResolveConflict(ctx, s.root, req.Path, req.Decision); err != nil {
+				return err
+			}
+			t.Progress("complete", "Conflict resolved", 1, 1)
+			return nil
+		})
+		writeOK(w, map[string]any{"task_id": task.ID})
+		return
+	}
+	if err := commands.ResolveConflict(r.Context(), s.root, req.Path, req.Decision); err != nil {
+		writeErr(w, err)
+		return
+	}
+	st, _ := commands.GetConflicts(r.Context(), s.root)
+	writeOK(w, map[string]any{"ok": true, "active": st.Active, "conflicts": st.Conflicts, "state": st})
 }
 
 func (s *Server) handleProjectVerify(w http.ResponseWriter, r *http.Request) {
@@ -1022,6 +1127,28 @@ func (s *Server) handleGCPreview(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = json.NewDecoder(r.Body).Decode(&req)
 	res, err := computeGCImpact(r.Context(), s.root, commands.GCImpactOptions{ProtectTags: req.ProtectTags, ProtectAllTags: req.ProtectAllTags})
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeOK(w, res)
+}
+
+func (s *Server) handleAssetChanges(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		ExactHash bool `json:"exact_hash"`
+		Limit     int  `json:"limit"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&req)
+	if req.Limit <= 0 {
+		req.Limit = 500
+	}
+	a, err := s.loadApp(r)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	res, err := commands.ComputeAssetChangesForApp(a, commands.AssetChangesOptions{ExactHash: req.ExactHash, Limit: req.Limit})
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -1581,6 +1708,17 @@ func cloneTask(t *Task) *Task {
 
 func taskRunnerFor(root, typ string, opts map[string]any) func(context.Context, *Task) error {
 	switch typ {
+	case "update_project":
+		force := boolOpt(opts, "force")
+		strict := boolOpt(opts, "strict")
+		return func(ctx context.Context, t *Task) error {
+			t.Progress("update", "Updating project", 0, 0)
+			err := commands.Update(ctx, root, commands.UpdateOptions{Force: force, Strict: strict, Progress: taskProgressFromCommand(t)})
+			if err == nil {
+				t.Progress("complete", "Update completed", 1, 1)
+			}
+			return err
+		}
 	case "sync_project":
 		force := boolOpt(opts, "force")
 		return func(ctx context.Context, t *Task) error {
@@ -1591,14 +1729,13 @@ func taskRunnerFor(root, typ string, opts map[string]any) func(context.Context, 
 			}
 			return err
 		}
-	case "submit_project":
+	case "submit_project", "publish_project":
 		msg := stringOpt(opts, "message")
-		allowUnmanaged := boolOpt(opts, "allow_unmanaged")
 		return func(ctx context.Context, t *Task) error {
-			t.Progress("submit", "Submitting project", 1, 3)
-			err := commands.SubmitWithOptions(ctx, root, msg, commands.SubmitOptions{AllowUnmanaged: allowUnmanaged})
+			t.Progress("publish", "Publishing project", 0, 0)
+			err := commands.Publish(ctx, root, msg, commands.PublishOptions{Progress: taskProgressFromCommand(t)})
 			if err == nil {
-				t.Progress("complete", "Submit completed", 3, 3)
+				t.Progress("complete", "Publish completed", 1, 1)
 			}
 			return err
 		}
@@ -1636,16 +1773,12 @@ func computeGCImpact(ctx context.Context, root string, opts commands.GCImpactOpt
 }
 
 func assetHistory(ctx context.Context, root, path string) (map[string]any, error) {
-	a, err := app.Load(ctx, root)
-	if err != nil {
-		return nil, err
-	}
-	idx, err := historyindex.Build(gdgit.New(a.Root), a.Config.ManifestPath)
+	res, err := commands.HistoryVersions(ctx, root, path)
 	if err != nil {
 		return nil, err
 	}
 	versions := []map[string]any{}
-	for _, it := range idx.ForPath(path) {
+	for _, it := range res.Versions {
 		versions = append(versions, map[string]any{
 			"path":    it.Path,
 			"commit":  it.Commit,
@@ -1657,5 +1790,5 @@ func assetHistory(ctx context.Context, root, path string) (map[string]any, error
 			"deleted": it.Deleted,
 		})
 	}
-	return map[string]any{"path": path, "versions": versions}, nil
+	return map[string]any{"path": res.Path, "versions": versions}, nil
 }

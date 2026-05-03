@@ -11,6 +11,7 @@ import (
 	"github.com/1051093860/gamedepot/internal/config"
 	gdgit "github.com/1051093860/gamedepot/internal/git"
 	"github.com/1051093860/gamedepot/internal/manifest"
+	gdrefs "github.com/1051093860/gamedepot/internal/refs"
 )
 
 type ProjectInitStatus struct {
@@ -27,8 +28,11 @@ type ProjectInitStatus struct {
 }
 
 type ProjectInitUEOptions struct {
-	Project string
-	Profile string
+	Project    string
+	Profile    string
+	RemoteURL  string
+	RemoteName string
+	Branch     string
 }
 
 func ProjectCheckInit(ctx context.Context, root string, jsonOut bool) error {
@@ -135,20 +139,37 @@ func ProjectInitUE(ctx context.Context, root string, opts ProjectInitUEOptions) 
 			return err
 		}
 	} else if !st.HasManifest {
-		// Minimal repair: recreate an empty manifest if the config exists but the manifest is missing.
+		// Minimal repair. Pointer-refs projects use depot/refs as a directory;
+		// legacy manifest projects use a single manifest JSON file.
 		cfg, err := config.Load(absRoot)
 		if err != nil {
 			return err
 		}
-		if err := os.MkdirAll(filepath.Dir(filepath.Join(absRoot, cfg.ManifestPath)), 0o755); err != nil {
-			return err
-		}
-		if err := manifest.Save(filepath.Join(absRoot, cfg.ManifestPath), manifest.New(cfg.ProjectID)); err != nil {
-			return err
+		if filepath.ToSlash(cfg.ManifestPath) == gdrefs.RootRel {
+			if err := os.MkdirAll(filepath.Join(absRoot, filepath.FromSlash(gdrefs.RootRel)), 0o755); err != nil {
+				return err
+			}
+		} else {
+			if err := os.MkdirAll(filepath.Dir(filepath.Join(absRoot, cfg.ManifestPath)), 0o755); err != nil {
+				return err
+			}
+			if err := manifest.Save(filepath.Join(absRoot, cfg.ManifestPath), manifest.New(cfg.ProjectID)); err != nil {
+				return err
+			}
 		}
 	}
 
 	if err := appendGitignore(absRoot); err != nil {
+		return err
+	}
+	if err := appendGitattributes(absRoot); err != nil {
+		return err
+	}
+	if err := SetupGitRemoteAndBranch(absRoot, GitRemoteSetupOptions{
+		RemoteURL:  opts.RemoteURL,
+		RemoteName: opts.RemoteName,
+		Branch:     opts.Branch,
+	}); err != nil {
 		return err
 	}
 
