@@ -13,3 +13,7 @@ GDTest/
 .DS_Store
 Thumbs.db
 dist/
+.venv
+uv.lock
+*.egg-info
+__pycache__/**

@@ -7,6 +7,12 @@
 
     [switch]$SkipGoBuild,
 
+    [switch]$SkipSaverBuild,
+
+    [switch]$SkipInstaller,
+
+    [switch]$ConsoleSaver,
+
     [switch]$Clean
 )
 
@@ -20,6 +26,42 @@ function Resolve-FullPath {
     }
 
     return [System.IO.Path]::GetFullPath((Join-Path (Get-Location) $Path))
+}
+
+function Require-Command {
+    param(
+        [string]$Name,
+        [string]$InstallHint
+    )
+
+    $cmd = Get-Command $Name -ErrorAction SilentlyContinue
+    if (!$cmd) {
+        throw "鎵句笉鍒?$Name銆?InstallHint"
+    }
+    return $cmd.Source
+}
+
+function Assert-GoMinVersion {
+    param([string]$MinVersion = "1.21")
+
+    $goVersionText = (& go version)
+    if ($LASTEXITCODE -ne 0) {
+        throw "go version failed."
+    }
+
+    Write-Host "Go:  $goVersionText"
+
+    if ($goVersionText -notmatch "go([0-9]+)\.([0-9]+)") {
+        Write-Warning "Unable to parse Go version; continuing build."
+        return
+    }
+
+    $major = [int]$Matches[1]
+    $minor = [int]$Matches[2]
+
+    if (($major -lt 1) -or (($major -eq 1) -and ($minor -lt 21))) {
+        throw "Go version is too low: $goVersionText. Please install Go 1.21 or newer."
+    }
 }
 
 function Find-ISCC {
@@ -45,7 +87,7 @@ function Find-ISCC {
         }
     }
 
-    throw "找不到 ISCC.exe。请安装 Inno Setup 6，或者使用 -ISCCPath 指定 ISCC.exe。"
+    throw "ISCC.exe not found. Install Inno Setup 6, or pass -ISCCPath to specify ISCC.exe."
 }
 
 function Copy-DirectoryClean {
@@ -55,7 +97,7 @@ function Copy-DirectoryClean {
     )
 
     if (!(Test-Path $Source)) {
-        throw "源目录不存在：$Source"
+        throw "婧愮洰褰曚笉瀛樺湪锛?Source"
     }
 
     if (Test-Path $Destination) {
@@ -64,6 +106,20 @@ function Copy-DirectoryClean {
 
     New-Item -ItemType Directory -Force -Path (Split-Path -Parent $Destination) | Out-Null
     Copy-Item -Recurse -Force $Source $Destination
+}
+
+function Invoke-External {
+    param(
+        [string]$DisplayName,
+        [scriptblock]$Command
+    )
+
+    Write-Host ""
+    Write-Host "== $DisplayName =="
+    & $Command
+    if ($LASTEXITCODE -ne 0) {
+        throw "$DisplayName failed with exit code $LASTEXITCODE"
+    }
 }
 
 if ([string]::IsNullOrWhiteSpace($RepoRoot)) {
@@ -76,39 +132,42 @@ $RepoRoot = Resolve-FullPath $RepoRoot
 $DistDir = Join-Path $RepoRoot "dist"
 $PayloadDir = Join-Path $DistDir "payload"
 $InstallerOutDir = Join-Path $DistDir "installer"
+$BuildDir = Join-Path $DistDir "build"
 
 $GameDepotExeOut = Join-Path $PayloadDir "gamedepot.exe"
+$SaverExeOut = Join-Path $PayloadDir "gamedepot-saver.exe"
 $PluginsOutDir = Join-Path $PayloadDir "plugins"
 
 $InnoScript = Join-Path $RepoRoot "installer\GameDepot.iss"
-
-# 仓库内插件目录：
-# plugins/unreal/GameDepotUE
 $GameDepotUEPluginDir = Join-Path $RepoRoot "plugins\unreal\GameDepotUE"
-
-# payload 内插件目录：
-# dist/payload/plugins/unreal/GameDepotUE
 $GameDepotUEPayloadDir = Join-Path $PluginsOutDir "unreal\GameDepotUE"
+$SaverProjectDir = Join-Path $RepoRoot "oss_manager_pyqt"
 
 if (!(Test-Path $InnoScript)) {
-    throw "找不到 Inno Setup 脚本：$InnoScript"
+    throw "鎵句笉鍒?Inno Setup 鑴氭湰锛?InnoScript"
 }
 
 if (!(Test-Path $GameDepotUEPluginDir)) {
-    throw "找不到 GameDepotUE 插件目录：$GameDepotUEPluginDir"
+    throw "鎵句笉鍒?GameDepotUE 鎻掍欢鐩綍锛?GameDepotUEPluginDir"
 }
 
 $UPluginFile = Join-Path $GameDepotUEPluginDir "GameDepotUE.uplugin"
 if (!(Test-Path $UPluginFile)) {
-    throw "找不到 UE 插件描述文件：$UPluginFile"
+    throw "鎵句笉鍒?UE 鎻掍欢鎻忚堪鏂囦欢锛?UPluginFile"
 }
 
-Write-Host "== GameDepot Installer Build =="
+if (!(Test-Path $SaverProjectDir)) {
+    throw "鎵句笉鍒?OSS 绠＄悊鍣ㄧ洰褰曪細$SaverProjectDir"
+}
+
+Write-Host "== GameDepot Full Installer Build =="
 Write-Host "RepoRoot:             $RepoRoot"
 Write-Host "Version:              $Version"
 Write-Host "PayloadDir:           $PayloadDir"
+Write-Host "InstallerOutDir:      $InstallerOutDir"
 Write-Host "UE Plugin Source:     $GameDepotUEPluginDir"
 Write-Host "UE Plugin Payload:    $GameDepotUEPayloadDir"
+Write-Host "OSS Manager Source:   $SaverProjectDir"
 Write-Host ""
 
 if ($Clean -and (Test-Path $DistDir)) {
@@ -118,29 +177,59 @@ if ($Clean -and (Test-Path $DistDir)) {
 
 New-Item -ItemType Directory -Force -Path $PayloadDir | Out-Null
 New-Item -ItemType Directory -Force -Path $InstallerOutDir | Out-Null
+New-Item -ItemType Directory -Force -Path $BuildDir | Out-Null
+
+Write-Host "Checking toolchain..."
+if (!$SkipGoBuild) {
+    Require-Command "go" "Please install Go 1.21+ and ensure go.exe is in PATH." | Out-Null
+    Assert-GoMinVersion "1.21"
+}
+else {
+    Write-Host "Go:  skipped by -SkipGoBuild"
+}
+
+if (!$SkipSaverBuild) {
+    Require-Command "uv" 'Please install uv: powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"' | Out-Null
+    $uvVersionText = (& uv --version)
+    if ($LASTEXITCODE -ne 0) {
+        throw "uv --version failed."
+    }
+    Write-Host "uv:  $uvVersionText"
+}
+else {
+    Write-Host "uv:  skipped by -SkipSaverBuild"
+}
+
+if (!$SkipInstaller) {
+    $ISCC = Find-ISCC -ExplicitPath $ISCCPath
+    Write-Host "ISCC: $ISCC"
+}
+else {
+    Write-Host "ISCC: skipped by -SkipInstaller"
+}
 
 if (!$SkipGoBuild) {
-    Write-Host "Building gamedepot.exe..."
+    if (Test-Path $GameDepotExeOut) {
+        Remove-Item -Force $GameDepotExeOut
+    }
 
     $oldGOOS = $env:GOOS
     $oldGOARCH = $env:GOARCH
+    $oldCGO = $env:CGO_ENABLED
 
     try {
         $env:GOOS = "windows"
         $env:GOARCH = "amd64"
+        $env:CGO_ENABLED = "0"
 
         Push-Location $RepoRoot
-
-        & go build `
-            -trimpath `
-            -ldflags="-s -w" `
-            -o $GameDepotExeOut `
-            ./cmd/gamedepot
-
-        if ($LASTEXITCODE -ne 0) {
-            throw "go build failed with exit code $LASTEXITCODE"
+        Invoke-External "Building gamedepot.exe" {
+            & go build `
+                -trimpath `
+                -ldflags="-s -w" `
+                -o $GameDepotExeOut `
+                ./cmd/gamedepot
         }
-
         Pop-Location
     }
     catch {
@@ -150,45 +239,97 @@ if (!$SkipGoBuild) {
     finally {
         $env:GOOS = $oldGOOS
         $env:GOARCH = $oldGOARCH
+        $env:CGO_ENABLED = $oldCGO
     }
 }
 else {
     Write-Host "SkipGoBuild enabled. Using existing exe: $GameDepotExeOut"
-
-    if (!(Test-Path $GameDepotExeOut)) {
-        throw "SkipGoBuild 已开启，但不存在：$GameDepotExeOut"
-    }
 }
 
 if (!(Test-Path $GameDepotExeOut)) {
-    throw "gamedepot.exe 构建失败或不存在：$GameDepotExeOut"
+    throw "gamedepot.exe 鏋勫缓澶辫触鎴栦笉瀛樺湪锛?GameDepotExeOut"
 }
 
-Write-Host "Copying plugins..."
+if (!$SkipSaverBuild) {
+    if (Test-Path $SaverExeOut) {
+        Remove-Item -Force $SaverExeOut
+    }
 
+    $PyInstallerWork = Join-Path $BuildDir "pyinstaller-work"
+    $PyInstallerSpec = Join-Path $BuildDir "pyinstaller-spec"
+    if (Test-Path $PyInstallerWork) { Remove-Item -Recurse -Force $PyInstallerWork }
+    if (Test-Path $PyInstallerSpec) { Remove-Item -Recurse -Force $PyInstallerSpec }
+    New-Item -ItemType Directory -Force -Path $PyInstallerWork | Out-Null
+    New-Item -ItemType Directory -Force -Path $PyInstallerSpec | Out-Null
+
+    $WindowMode = if ($ConsoleSaver) { "--console" } else { "--windowed" }
+
+    Push-Location $SaverProjectDir
+    try {
+        Invoke-External "uv sync for gamedepot-saver" {
+            & uv sync --all-extras
+        }
+
+        $PyInstallerArgs = @(
+            "run",
+            "--with", "pyinstaller",
+            "python", "-m", "PyInstaller",
+            "--noconfirm",
+            "--clean",
+            "--onefile",
+            $WindowMode,
+            "--name", "gamedepot-saver",
+            "--distpath", $PayloadDir,
+            "--workpath", $PyInstallerWork,
+            "--specpath", $PyInstallerSpec,
+            "--collect-submodules", "boto3",
+            "--collect-submodules", "botocore",
+            "--collect-submodules", "s3transfer",
+            "--collect-submodules", "oss2",
+            "oss_manager\__main__.py"
+        )
+
+        Invoke-External "Building gamedepot-saver.exe" {
+            & uv @PyInstallerArgs
+        }
+    }
+    catch {
+        throw
+    }
+    finally {
+        Pop-Location
+    }
+}
+else {
+    Write-Host "SkipSaverBuild enabled. Using existing exe: $SaverExeOut"
+}
+
+if (!(Test-Path $SaverExeOut)) {
+    throw "gamedepot-saver.exe 鏋勫缓澶辫触鎴栦笉瀛樺湪锛?SaverExeOut"
+}
+
+Write-Host ""
+Write-Host "== Copying plugins =="
 if (Test-Path $PluginsOutDir) {
     Remove-Item -Recurse -Force $PluginsOutDir
 }
-
 New-Item -ItemType Directory -Force -Path $PluginsOutDir | Out-Null
+Copy-DirectoryClean -Source $GameDepotUEPluginDir -Destination $GameDepotUEPayloadDir
 
-Copy-DirectoryClean `
-    -Source $GameDepotUEPluginDir `
-    -Destination $GameDepotUEPayloadDir
-
+Write-Host ""
 Write-Host "Payload prepared:"
 Write-Host "  $GameDepotExeOut"
+Write-Host "  $SaverExeOut"
 Write-Host "  $GameDepotUEPayloadDir"
+
+if ($SkipInstaller) {
+    Write-Host ""
+    Write-Host "SkipInstaller enabled. Payload build complete."
+    return
+}
+
 Write-Host ""
-
-$ISCC = Find-ISCC -ExplicitPath $ISCCPath
-
-Write-Host "Using ISCC:"
-Write-Host "  $ISCC"
-Write-Host ""
-
-Write-Host "Building Inno Setup installer..."
-
+Write-Host "== Building Inno Setup installer =="
 & $ISCC `
     "/DMyAppVersion=$Version" `
     "/DSourceDir=$PayloadDir" `
@@ -214,7 +355,6 @@ else {
 }
 
 Write-Host ""
-Write-Host "Next:"
-Write-Host "  1. Run installer exe"
-Write-Host "  2. Reopen PowerShell"
-Write-Host "  3. Test: gamedepot version"
+Write-Host "Installed commands after setup:"
+Write-Host "  gamedepot version"
+Write-Host "  gamedepot-saver ."

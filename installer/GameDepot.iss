@@ -12,6 +12,7 @@
 
 #define MyAppName "GameDepot"
 #define MyAppExeName "gamedepot.exe"
+#define MySaverExeName "gamedepot-saver.exe"
 
 [Setup]
 AppId={{F2D1D4E2-1A2E-4E3A-9D6D-7A8E9C03B901}
@@ -39,15 +40,22 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Files]
 Source: "{#SourceDir}\gamedepot.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#SourceDir}\gamedepot-saver.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceDir}\plugins\*"; DestDir: "{app}\plugins"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [InstallDelete]
 Type: files; Name: "{app}\gamedepot.exe"
+Type: files; Name: "{app}\gamedepot-saver.exe"
 Type: filesandordirs; Name: "{app}\plugins"
 
 [UninstallDelete]
 Type: filesandordirs; Name: "{app}\plugins"
+Type: files; Name: "{app}\gamedepot-saver.exe"
 Type: files; Name: "{app}\install.json"
+
+[Icons]
+Name: "{autoprograms}\GameDepot Saver"; Filename: "{app}\{#MySaverExeName}"; WorkingDir: "{app}"
+Name: "{autoprograms}\GameDepot CLI"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"
 
 [Code]
 
@@ -260,6 +268,7 @@ begin
     '  "version": "{#MyAppVersion}",' + #13#10 +
     '  "install_root": "' + JsonEscape(AppDir) + '",' + #13#10 +
     '  "exe_path": "' + JsonEscape(AppDir + '\{#MyAppExeName}') + '",' + #13#10 +
+    '  "saver_exe_path": "' + JsonEscape(AppDir + '\{#MySaverExeName}') + '",' + #13#10 +
     '  "plugins_dir": "' + JsonEscape(AppDir + '\plugins') + '",' + #13#10 +
     '  "unreal_plugin_dir": "' + JsonEscape(AppDir + '\plugins\unreal\GameDepotUE') + '",' + #13#10 +
     '  "path_added": true,' + #13#10 +
@@ -272,6 +281,7 @@ end;
 procedure DeleteOldGameDepotFiles();
 var
   OldExe: string;
+  OldSaverExe: string;
   OldPluginsDir: string;
   NewAppDir: string;
 begin
@@ -287,6 +297,7 @@ begin
   end;
 
   OldExe := AddBackslash(ExistingExeDir) + '{#MyAppExeName}';
+  OldSaverExe := AddBackslash(ExistingExeDir) + '{#MySaverExeName}';
   OldPluginsDir := AddBackslash(ExistingExeDir) + 'plugins';
 
   Log('Deleting old GameDepot files from: ' + ExistingExeDir);
@@ -314,6 +325,21 @@ begin
         '旧 gamedepot.exe 删除失败：' + #13#10 +
         OldExe + #13#10#13#10 +
         '可能是 GameDepot daemon、UE 编辑器或命令行仍在运行。' + #13#10 +
+        '你可以稍后手动删除这个文件。',
+        mbError,
+        MB_OK
+      );
+    end;
+  end;
+
+  if FileExists(OldSaverExe) then
+  begin
+    if not DeleteFile(OldSaverExe) then
+    begin
+      MsgBox(
+        '旧 gamedepot-saver.exe 删除失败：' + #13#10 +
+        OldSaverExe + #13#10#13#10 +
+        '可能是 OSS 管理器仍在运行。' + #13#10 +
         '你可以稍后手动删除这个文件。',
         mbError,
         MB_OK
@@ -363,6 +389,7 @@ end;
 procedure CurStepChanged(CurStep: TSetupStep);
 var
   ExePath: string;
+  SaverExePath: string;
 begin
   if CurStep = ssPostInstall then
   begin
@@ -370,12 +397,22 @@ begin
     WriteInstallManifest();
 
     ExePath := ExpandConstant('{app}\{#MyAppExeName}');
+    SaverExePath := ExpandConstant('{app}\{#MySaverExeName}');
 
     if not FileExists(ExePath) then
     begin
       MsgBox(
         'GameDepot 安装失败：未找到 gamedepot.exe。' + #13#10#13#10 +
         ExePath,
+        mbError,
+        MB_OK
+      );
+    end
+    else if not FileExists(SaverExePath) then
+    begin
+      MsgBox(
+        'GameDepot 安装失败：未找到 gamedepot-saver.exe。' + #13#10#13#10 +
+        SaverExePath,
         mbError,
         MB_OK
       );
